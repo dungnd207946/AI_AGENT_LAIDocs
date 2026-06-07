@@ -328,21 +328,70 @@ def rrf_fuse(ranked_lists: list[list[str]], k: int = _RRF_K,
 
 
 # ---------------------------------------------------------------------------
-# Full hybrid retrieval pipeline
+# Hybrid ranking (single query → fused unit_ids)
+# ---------------------------------------------------------------------------
+
+
+def hybrid_rank(
+    doc_id: str,
+    question: str,
+    settings: Settings,
+    units: list[dict] | None = None,
+    tree: dict | None = None,
+) -> tuple[list[str], list[str] | None]:
+    """Rank units for one query by fusing tree + BM25 + dense signals.
+
+    Returns ``(fused_unit_ids, tree_selected)`` where ``tree_selected`` is the
+    raw tree-reasoning selection (``[]`` = explicitly nothing relevant,
+    ``None`` = tree unavailable/errored) so callers can preserve out-of-scope
+    semantics. Any retriever that is unavailable or errors is dropped.
+    """
+    units = units if units is not None else get_retrieval_units(doc_id)
+    if not units:
+        return [], None
+
+    ranked_lists: list[list[str]] = []
+
+    tree = tree if tree is not None else get_tree_index(doc_id)
+    tree_selected: list[str] | None = None
+    if tree and tree.get("structure"):
+        try:
+            tree_selected = select_node_ids(tree, question, settings)
+            if tree_selected:
+                ranked_lists.append(tree_selected)
+        except Exception:
+            logger.exception("Tree node selection failed for doc %s", doc_id)
+
+    try:
+        bm = bm25_search(doc_id, question, units=units)
+        if bm:
+            ranked_lists.append(bm)
+    except Exception:
+        logger.exception("BM25 retrieval failed for doc %s", doc_id)
+
+    try:
+        dense = dense_search(doc_id, question, settings, units=units)
+        if dense:
+            ranked_lists.append(dense)
+    except Exception:
+        logger.exception("Dense retrieval failed for doc %s", doc_id)
+
+    if not ranked_lists:
+        return [], tree_selected
+    return rrf_fuse(ranked_lists), tree_selected
+
+
+# ---------------------------------------------------------------------------
+# Full hybrid retrieval pipeline (single-shot)
 # ---------------------------------------------------------------------------
 
 
 def retrieve_context(doc_id: str, question: str, settings: Settings | None = None) -> str:
-    """Hybrid retrieval → context string for the given question.
+    """Single-shot hybrid retrieval → context string for the given question.
 
-    Fuses up to three signals with Reciprocal Rank Fusion:
-      1. Tree reasoning — LLM selects relevant heading nodes (when a tree exists).
-      2. BM25 — lexical recall over the same unit corpus.
-      3. Dense — Gemini/OpenAI embedding cosine (lazily indexed, when configured).
-
-    Degrades gracefully: any retriever that is unavailable or errors is simply
-    dropped from the fusion. If nothing is available, falls back to truncated
-    raw content.
+    Fuses tree reasoning + BM25 + dense embeddings via RRF. Degrades
+    gracefully: any unavailable retriever is dropped; if nothing is available,
+    falls back to truncated raw content. Used as the agentic loop's fallback.
     """
     settings = settings or get_settings()
 
@@ -355,44 +404,172 @@ def retrieve_context(doc_id: str, question: str, settings: Settings | None = Non
         return ""
     unit_map = {u["unit_id"]: u for u in units}
 
-    ranked_lists: list[list[str]] = []
-
-    # 1. Tree reasoning (only when a heading tree exists).
-    tree = get_tree_index(doc_id)
-    tree_selected: list[str] | None = None
-    if tree and tree.get("structure"):
-        try:
-            tree_selected = select_node_ids(tree, question, settings)
-            if tree_selected:
-                ranked_lists.append(tree_selected)
-        except Exception:
-            logger.exception("Tree node selection failed for doc %s", doc_id)
-
-    # 2. BM25 lexical.
-    try:
-        bm = bm25_search(doc_id, question, units=units)
-        if bm:
-            ranked_lists.append(bm)
-    except Exception:
-        logger.exception("BM25 retrieval failed for doc %s", doc_id)
-
-    # 3. Dense embeddings (lazy index).
-    try:
-        dense = dense_search(doc_id, question, settings, units=units)
-        if dense:
-            ranked_lists.append(dense)
-    except Exception:
-        logger.exception("Dense retrieval failed for doc %s", doc_id)
+    fused, tree_selected = hybrid_rank(doc_id, question, settings, units=units)
 
     # If tree reasoning was the ONLY available signal and it deliberately
     # returned nothing, treat the question as out-of-scope (preserves the
     # anti-hallucination behaviour from the pure tree-reasoning pipeline).
-    if not ranked_lists:
+    if not fused:
         if tree_selected == []:
             return ""
         content = get_document_content(doc_id)
         return content[:MAX_CONTEXT_CHARS] if content else ""
 
-    fused = rrf_fuse(ranked_lists)
     selected = [unit_map[uid] for uid in fused if uid in unit_map]
+    return build_context_from_units(selected)
+
+
+# ---------------------------------------------------------------------------
+# Agentic iterative retrieval (multi-hop, self-critique)
+# ---------------------------------------------------------------------------
+
+# Loop bounds. Gemini Flash makes a few extra calls cheap; cap rounds so a
+# pathological question can't run away.
+MAX_RETRIEVAL_ROUNDS = 3
+MAX_FOLLOWUPS_PER_ROUND = 2
+MAX_ACCUMULATED_UNITS = 12
+
+_CRITIQUE_PROMPT = """\
+You judge whether retrieved document context is SUFFICIENT to fully answer a \
+question, and if not, what to search for next.
+
+Question:
+{question}
+
+Retrieved context so far:
+{context}
+
+Respond with ONLY a JSON object, no prose:
+{{"sufficient": true|false, "missing": "<what is still needed, or empty>", \
+"followups": ["<specific search query>", ...]}}
+
+Rules:
+- sufficient=true if the context already contains everything needed to answer.
+- If the document clearly does not cover the topic, set sufficient=true and \
+followups=[] (do not invent searches).
+- If false, followups must be 1-{max_followups} SPECIFIC search queries \
+targeting the missing information (not rephrasings of the original question).
+"""
+
+
+def _critique(question: str, context: str, settings: Settings) -> dict:
+    """Ask the LLM whether `context` suffices; suggest follow-up sub-queries.
+
+    Returns a dict with keys ``sufficient`` (bool) and ``followups``
+    (list[str]). On any error, defaults to sufficient=True (stop the loop)
+    so retrieval never hangs on a flaky critique call.
+    """
+    prompt = _CRITIQUE_PROMPT.format(
+        question=question,
+        context=context or "(nothing retrieved yet)",
+        max_followups=MAX_FOLLOWUPS_PER_ROUND,
+    )
+    try:
+        model = create_chat_model(settings.active_llm, temperature=0, max_tokens=300)
+        resp = model.invoke([{"role": "user", "content": prompt}])
+        raw = resp.content if isinstance(resp.content, str) else str(resp.content)
+        match = re.search(r"\{.*\}", raw or "", re.DOTALL)
+        if not match:
+            return {"sufficient": True, "followups": []}
+        data = json.loads(match.group())
+        followups = data.get("followups") or []
+        followups = [str(f).strip() for f in followups if str(f).strip()]
+        return {
+            "sufficient": bool(data.get("sufficient", True)),
+            "followups": followups[:MAX_FOLLOWUPS_PER_ROUND],
+        }
+    except Exception:
+        logger.exception("Retrieval critique failed; treating as sufficient")
+        return {"sufficient": True, "followups": []}
+
+
+def agentic_retrieve_context(
+    doc_id: str,
+    question: str,
+    settings: Settings | None = None,
+    max_rounds: int = MAX_RETRIEVAL_ROUNDS,
+) -> str:
+    """Iterative multi-hop retrieval with self-critique.
+
+    Round 1 retrieves for the original question. After each round the LLM
+    critiques the accumulated evidence; if insufficient, its follow-up
+    sub-queries drive the next round. Evidence accumulates across rounds and
+    sub-queries, scored by best RRF rank seen, then the top units are
+    assembled into the final context.
+
+    Terminates when the critique is satisfied, no new units are found, no
+    follow-ups are produced, or ``max_rounds`` is reached. Falls back to the
+    single-shot path when an LLM is not configured.
+    """
+    settings = settings or get_settings()
+
+    if not is_llm_configured(settings.active_llm):
+        return retrieve_context(doc_id, question, settings)
+
+    units = get_retrieval_units(doc_id)
+    if not units:
+        return ""
+    unit_map = {u["unit_id"]: u for u in units}
+    tree = get_tree_index(doc_id)
+
+    # unit_id -> best fusion score seen across all rounds/sub-queries.
+    accumulated: dict[str, float] = {}
+    seen_queries: set[str] = set()
+    first_round_empty_tree_only = False
+
+    queries = [question]
+    for round_idx in range(max_rounds):
+        new_units_this_round = 0
+        for q in queries:
+            qkey = q.strip().lower()
+            if not qkey or qkey in seen_queries:
+                continue
+            seen_queries.add(qkey)
+
+            fused, tree_selected = hybrid_rank(
+                doc_id, q, settings, units=units, tree=tree
+            )
+            if round_idx == 0 and q == question and not fused and tree_selected == []:
+                first_round_empty_tree_only = True
+
+            for rank, uid in enumerate(fused):
+                if uid not in unit_map:
+                    continue
+                score = 1.0 / (_RRF_K + rank + 1)
+                if uid not in accumulated:
+                    new_units_this_round += 1
+                if score > accumulated.get(uid, 0.0):
+                    accumulated[uid] = score
+
+        # Out-of-scope: first round produced only an empty tree selection and
+        # nothing else — honour the anti-hallucination contract.
+        if not accumulated and first_round_empty_tree_only:
+            return ""
+        if not accumulated:
+            break
+
+        # Build current best-effort context for the critic.
+        ordered = sorted(accumulated.items(), key=lambda x: x[1], reverse=True)
+        selected = [unit_map[uid] for uid, _ in ordered[:MAX_ACCUMULATED_UNITS]]
+        context = build_context_from_units(selected)
+
+        # Last round: no point critiquing, we won't retrieve again.
+        if round_idx == max_rounds - 1:
+            break
+
+        verdict = _critique(question, context, settings)
+        if verdict["sufficient"] or not verdict["followups"]:
+            break
+        if new_units_this_round == 0:
+            break  # converged — extra rounds won't add evidence
+
+        queries = verdict["followups"]
+
+    if not accumulated:
+        # Nothing from any retriever — fall back to raw content.
+        content = get_document_content(doc_id)
+        return content[:MAX_CONTEXT_CHARS] if content else ""
+
+    ordered = sorted(accumulated.items(), key=lambda x: x[1], reverse=True)
+    selected = [unit_map[uid] for uid, _ in ordered[:MAX_ACCUMULATED_UNITS]]
     return build_context_from_units(selected)

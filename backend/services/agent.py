@@ -99,7 +99,9 @@ def retrieve_context(question: str) -> str:
     if not doc_id or not settings:
         return "Error: Document context not configured."
 
-    context = retrieval.retrieve_context(doc_id, question, settings)
+    # Agentic multi-hop retrieval: retrieve, self-critique, and chase missing
+    # evidence with follow-up sub-queries before returning the fused context.
+    context = retrieval.agentic_retrieve_context(doc_id, question, settings)
     if context:
         return context
     return "No relevant sections found in the document for this question."
