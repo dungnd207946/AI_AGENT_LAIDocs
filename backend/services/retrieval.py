@@ -148,43 +148,215 @@ def get_retrieval_units(doc_id: str) -> list[dict]:
     Prefers tree nodes (unit_id = node_id) so BM25/dense/tree all rank the
     same units and fuse cleanly. Falls back to paragraph chunks for documents
     with no heading tree (unit_id = "c0001", ...).
+
+    Dedicated *multimodal* units (figures with their captions/VLM descriptions
+    and tables with their captions) are appended to whichever text corpus is
+    used, so questions about a figure or table retrieve a focused unit instead
+    of a whole section. Their ids are namespaced (``img0001``, ``tbl0001``) so
+    they never collide with tree node ids or chunk ids.
     """
+    content = get_document_content(doc_id)
+
+    base: list[dict] = []
     tree = get_tree_index(doc_id)
     if tree and tree.get("structure"):
         nodes = structure_to_list(tree["structure"])
-        units = [
+        base = [
             {
                 "unit_id": str(n.get("node_id")),
                 "title": n.get("title", "Untitled"),
                 "text": n.get("text", ""),
+                "kind": "text",
             }
             for n in nodes
             if n.get("node_id") is not None and n.get("text")
         ]
-        if units:
-            return units
 
-    content = get_document_content(doc_id)
-    if not content:
+    if not base and content:
+        base = [
+            {"unit_id": f"c{i + 1:04d}", "title": "", "text": chunk, "kind": "text"}
+            for i, chunk in enumerate(_chunk_text(content))
+        ]
+
+    if not base:
         return []
-    return [
-        {"unit_id": f"c{i + 1:04d}", "title": "", "text": chunk}
-        for i, chunk in enumerate(_chunk_text(content))
-    ]
+
+    if content:
+        base.extend(get_multimodal_units(doc_id, content=content))
+    return base
 
 
 def build_context_from_units(units: list[dict]) -> str:
-    """Assemble a bounded context string from retrieval units."""
+    """Assemble a bounded context string from retrieval units.
+
+    Figures and tables are labelled distinctly so the model can cite them and
+    knows it is reading an image description or tabular data, not prose.
+    """
     ctx = ""
     for u in units:
+        kind = u.get("kind", "text")
         title = u.get("title") or "Section"
         uid = u.get("unit_id", "?")
         text = u.get("text", "")
-        section = f"[Section: {title} (node {uid})]\n{text}\n\n"
+        if kind == "image":
+            header = f"[Figure: {title} ({uid})]"
+        elif kind == "table":
+            header = f"[Table: {title} ({uid})]"
+        else:
+            header = f"[Section: {title} (node {uid})]"
+        section = f"{header}\n{text}\n\n"
         if len(ctx) + len(section) > MAX_CONTEXT_CHARS:
             break
         ctx += section
     return ctx.strip()
+
+
+# ---------------------------------------------------------------------------
+# Multimodal units — figures (image captions / VLM descriptions) and tables
+# ---------------------------------------------------------------------------
+
+# ``![alt](url)`` — Docling/VaultPictureSerializer emit ``![Image N](/assets/..)``.
+_IMG_RE = re.compile(r"!\[(?P<alt>[^\]]*)\]\((?P<url>[^)]*)\)")
+# A generic, content-free alt text we should not treat as a real caption.
+_GENERIC_ALT_RE = re.compile(r"^image\s*\d*$", re.IGNORECASE)
+# Markdown table separator row, e.g. ``| --- | :---: |``.
+_TABLE_SEP_RE = re.compile(r"^\s*\|?[\s:|-]*-[\s:|-]*\|?\s*$")
+# A line that looks like an explicit figure/table caption (multilingual).
+_CAPTION_RE = re.compile(
+    r"^\s*(?:#+\s*|\*+\s*)?(?:figure|fig\.?|table|chart|diagram|"
+    r"hình|bảng|biểu đồ)\b",
+    re.IGNORECASE,
+)
+
+
+def _clean_caption(line: str) -> str:
+    """Strip markdown heading/emphasis markers from a candidate caption line."""
+    return line.strip().lstrip("#>*_ ").strip().strip("*_").strip()
+
+
+def _nearest_caption(lines: list[str], idx: int) -> str:
+    """Find an explicit caption near ``lines[idx]`` (a figure/table anchor).
+
+    Looks a few non-blank lines before and after for a line beginning with
+    ``Figure``/``Table``/etc. Returns the cleaned caption text, or "".
+    """
+    for delta in (-1, -2, 1, 2, -3, 3):
+        j = idx + delta
+        if 0 <= j < len(lines):
+            line = lines[j].strip()
+            if line and _CAPTION_RE.match(line) and not line.startswith("|"):
+                return _clean_caption(line)[:200]
+    return ""
+
+
+def _extract_image_units(content: str) -> list[dict]:
+    """Parse figures into retrieval units: alt text + VLM description + caption.
+
+    Skips images whose only signal is a generic ``Image N`` alt with no
+    description or caption — they add noise to lexical/dense retrieval without
+    being answerable. Each kept unit gets id ``img0001``, ``img0002``, ...
+    """
+    lines = content.split("\n")
+    units: list[dict] = []
+    n = 0
+    for idx, line in enumerate(lines):
+        m = _IMG_RE.search(line)
+        if not m:
+            continue
+        n += 1
+        alt = m.group("alt").strip()
+
+        # Collect the VLM description block: ``> **Description:** ...`` quote
+        # lines that follow the image (allowing one blank line in between).
+        desc_parts: list[str] = []
+        j = idx + 1
+        seen_blank = False
+        while j < len(lines):
+            s = lines[j].strip()
+            if not s:
+                if seen_blank:
+                    break
+                seen_blank = True
+                j += 1
+                continue
+            if s.startswith(">"):
+                desc_parts.append(s.lstrip(">").strip())
+                j += 1
+                continue
+            break
+        description = " ".join(desc_parts)
+        description = re.sub(r"^\**\s*description:\s*\**\s*", "", description,
+                             flags=re.IGNORECASE).strip()
+
+        caption = _nearest_caption(lines, idx)
+        generic = bool(_GENERIC_ALT_RE.match(alt))
+        if not description and not caption and generic:
+            continue  # nothing searchable about this image
+
+        title = caption or (alt if not generic else f"Figure {n}")
+        text_parts = [p for p in (caption, alt if not generic else "", description) if p]
+        text = "\n".join(text_parts)
+        units.append({
+            "unit_id": f"img{n:04d}",
+            "title": title[:200],
+            "text": text,
+            "kind": "image",
+        })
+    return units
+
+
+def _extract_table_units(content: str) -> list[dict]:
+    """Parse markdown tables into retrieval units, with nearby captions.
+
+    A table is a run of ``|``-delimited rows whose second line is a separator
+    (``| --- |``). The intact markdown table is kept as the unit text so the
+    model can read the cells directly for table QA. Ids are ``tbl0001``, ...
+    """
+    lines = content.split("\n")
+    units: list[dict] = []
+    n = 0
+    i = 0
+    while i < len(lines):
+        row = lines[i].strip()
+        is_row = row.startswith("|")
+        is_sep = (
+            i + 1 < len(lines)
+            and "|" in lines[i + 1]
+            and _TABLE_SEP_RE.match(lines[i + 1].strip())
+        )
+        if is_row and is_sep:
+            block = [lines[i]]
+            j = i + 1
+            while j < len(lines) and lines[j].strip().startswith("|"):
+                block.append(lines[j])
+                j += 1
+            n += 1
+            caption = _nearest_caption(lines, i)
+            table_md = "\n".join(b for b in block).strip()
+            title = caption or f"Table {n}"
+            text = f"{caption}\n{table_md}" if caption else table_md
+            units.append({
+                "unit_id": f"tbl{n:04d}",
+                "title": title[:200],
+                "text": text,
+                "kind": "table",
+            })
+            i = j
+        else:
+            i += 1
+    return units
+
+
+def get_multimodal_units(doc_id: str, content: str | None = None) -> list[dict]:
+    """Return dedicated figure + table units for a document.
+
+    Parsed lazily from the stored markdown at query time (no ingest hook), so
+    multimodal retrieval works for already-converted documents too.
+    """
+    content = content if content is not None else get_document_content(doc_id)
+    if not content:
+        return []
+    return _extract_image_units(content) + _extract_table_units(content)
 
 
 # ---------------------------------------------------------------------------
