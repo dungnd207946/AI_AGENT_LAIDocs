@@ -88,3 +88,60 @@ def create_chat_model(
 
     params.update(kwargs)
     return init_chat_model(**params)
+
+
+# ---------------------------------------------------------------------------
+# Embeddings (dense retrieval)
+# ---------------------------------------------------------------------------
+
+# Provider defaults for embedding models.
+_DEFAULT_EMBED_MODEL = {
+    "google_genai": "models/text-embedding-004",
+    "openai": "text-embedding-3-small",
+}
+
+
+def embeddings_supported(cfg: LLMConfig) -> bool:
+    """Whether dense embeddings can be produced for this config.
+
+    Only Gemini and OpenAI-compatible providers expose embeddings here;
+    Anthropic does not. Requires the same credentials as chat.
+    """
+    provider = normalize_provider(cfg.provider)
+    if provider not in _DEFAULT_EMBED_MODEL:
+        return False
+    if provider == "openai":
+        return bool(cfg.base_url or cfg.api_key)
+    return bool(cfg.api_key)  # gemini
+
+
+def embed_model_name(cfg: LLMConfig) -> str:
+    """Resolve the concrete embedding model name for a config."""
+    provider = normalize_provider(cfg.provider)
+    return cfg.embed_model or _DEFAULT_EMBED_MODEL.get(provider, "")
+
+
+def create_embeddings(cfg: LLMConfig):
+    """Build a LangChain embeddings client for the given provider.
+
+    Raises ValueError if the provider has no supported embedding backend.
+    """
+    provider = normalize_provider(cfg.provider)
+    model = cfg.embed_model or _DEFAULT_EMBED_MODEL.get(provider, "")
+
+    if provider == "google_genai":
+        from langchain_google_genai import GoogleGenerativeAIEmbeddings
+
+        return GoogleGenerativeAIEmbeddings(
+            model=model,
+            google_api_key=cfg.api_key or None,
+        )
+    if provider == "openai":
+        from langchain_openai import OpenAIEmbeddings
+
+        return OpenAIEmbeddings(
+            model=model,
+            base_url=cfg.base_url or None,
+            api_key=cfg.api_key or "sk-placeholder",
+        )
+    raise ValueError(f"No embedding backend for provider '{provider}'")

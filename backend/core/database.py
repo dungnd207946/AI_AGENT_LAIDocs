@@ -54,6 +54,20 @@ _MIGRATIONS = [
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 )""",
     "CREATE INDEX IF NOT EXISTS idx_chat_messages_doc_id ON chat_messages(doc_id)",
+    # Dense-retrieval vectors, one row per retrieval unit (tree node or chunk).
+    # vector is raw float32 bytes; model identifies which embedding produced it
+    # so a provider/model change can invalidate stale rows.
+    """CREATE TABLE IF NOT EXISTS document_embeddings (
+    doc_id TEXT NOT NULL,
+    unit_id TEXT NOT NULL,
+    title TEXT,
+    chunk TEXT NOT NULL,
+    model TEXT NOT NULL,
+    dim INTEGER NOT NULL,
+    vector BLOB NOT NULL,
+    PRIMARY KEY (doc_id, unit_id)
+)""",
+    "CREATE INDEX IF NOT EXISTS idx_doc_embeddings_doc ON document_embeddings(doc_id)",
 ]
 
 

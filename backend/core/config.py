@@ -19,6 +19,9 @@ class LLMConfig(BaseModel):
     base_url: str = ""
     api_key: str = ""
     model: str = ""
+    # Embedding model for dense retrieval. "" resolves to a provider default
+    # (Gemini: models/text-embedding-004, OpenAI: text-embedding-3-small).
+    embed_model: str = ""
 
 
 class Settings(BaseSettings):
@@ -33,6 +36,7 @@ class Settings(BaseSettings):
     default_llm_base_url: str = ""
     default_llm_api_key: str = ""
     default_llm_model: str = ""
+    default_llm_embed_model: str = ""
 
     @property
     def active_llm(self) -> LLMConfig:
@@ -41,6 +45,7 @@ class Settings(BaseSettings):
             base_url=self.llm.base_url or self.default_llm_base_url,
             api_key=self.llm.api_key or self.default_llm_api_key,
             model=self.llm.model or self.default_llm_model,
+            embed_model=self.llm.embed_model or self.default_llm_embed_model,
         )
 
     model_config = SettingsConfigDict(
