@@ -9,25 +9,23 @@ Replaces the stateless RAGPipeline with an agent that:
 
 from __future__ import annotations
 
-import asyncio
 import contextvars
-import json
 import logging
-from pathlib import Path
+import sqlite3
 from typing import Any
 
 from deepagents import create_deep_agent
 from deepagents.backends import StateBackend, CompositeBackend
 from deepagents.backends.store import StoreBackend
-from langchain.chat_models import init_chat_model
 from langchain_core.tools import tool
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph.state import CompiledStateGraph
-from langgraph.store.memory import InMemoryStore
+from langgraph.store.base import BaseStore
+from langgraph.store.sqlite import SqliteStore
 
 from ..core.config import Settings, get_settings, LAIDOCS_HOME
-from ..core.database import get_db
-from ..services.tree_index import find_nodes_by_ids, remove_fields
+from .llm import create_chat_model
+from . import retrieval
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +36,7 @@ logger = logging.getLogger(__name__)
 MEMORY_DIR = LAIDOCS_HOME / "memories"
 PREFERENCES_FILE = MEMORY_DIR / "preferences.md"
 CHECKPOINT_DB = LAIDOCS_HOME / "data" / "checkpoints.db"
+STORE_DB = LAIDOCS_HOME / "data" / "memory_store.db"
 
 # ---------------------------------------------------------------------------
 # SOUL System Prompt
@@ -72,99 +71,6 @@ save it to /memories/preferences.md for future conversations
 """
 
 # ---------------------------------------------------------------------------
-# Constants for retrieval
-# ---------------------------------------------------------------------------
-
-MAX_CONTEXT_CHARS = 12_000
-
-# ---------------------------------------------------------------------------
-# Helper functions (reused from rag.py)
-# ---------------------------------------------------------------------------
-
-
-def _get_tree_index(doc_id: str) -> dict | None:
-    """Load the tree index JSON for a document from SQLite."""
-    with get_db() as conn:
-        row = conn.execute(
-            "SELECT tree_index FROM documents WHERE id=?", (doc_id,)
-        ).fetchone()
-    if row and row[0]:
-        try:
-            return json.loads(row[0])
-        except (json.JSONDecodeError, TypeError):
-            return None
-    return None
-
-
-def _get_document_content(doc_id: str) -> str | None:
-    """Load raw markdown content for fallback."""
-    with get_db() as conn:
-        row = conn.execute(
-            "SELECT content FROM documents WHERE id=?", (doc_id,)
-        ).fetchone()
-    return row[0] if row and row[0] else None
-
-
-def _build_context_from_nodes(nodes: list[dict]) -> str:
-    """Build context string from selected tree nodes."""
-    ctx = ""
-    for node in nodes:
-        title = node.get('title', 'Untitled')
-        node_id = node.get('node_id', '?')
-        text = node.get('text', '')
-        section = f"[Section: {title} (node {node_id})]\n{text}\n\n"
-        if len(ctx) + len(section) > MAX_CONTEXT_CHARS:
-            break
-        ctx += section
-    return ctx.strip()
-
-
-def _select_nodes_sync(tree_index: dict, question: str, settings: Settings) -> list[str]:
-    """Ask LLM to select relevant node_ids from tree structure (sync, for thread pool).
-
-    Uses a separate synchronous LLM call (not the agent) for node selection.
-    Called via asyncio.to_thread() to avoid blocking the event loop.
-    """
-    import re
-    from openai import OpenAI
-
-    structure = tree_index.get('structure', [])
-    structure_no_text = remove_fields(structure, fields=['text'])
-
-    client = OpenAI(
-        base_url=settings.active_llm.base_url or None,
-        api_key=settings.active_llm.api_key or "sk-placeholder",
-    )
-
-    prompt = (
-        "Given this document's tree structure, identify which sections are most "
-        "relevant to answer the user's question. Return ONLY a JSON array of "
-        "node_ids, ordered by relevance. Select 1-5 nodes maximum.\n\n"
-        f"Document Structure:\n"
-        f"{json.dumps(structure_no_text, ensure_ascii=False, indent=2)}\n\n"
-        f"Question: {question}\n\n"
-        'Return format: ["0003", "0007"]'
-    )
-
-    resp = client.chat.completions.create(
-        model=settings.active_llm.model,
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0,
-        max_tokens=200,
-    )
-
-    raw = resp.choices[0].message.content or "[]"
-    match = re.search(r'\[.*?\]', raw, re.DOTALL)
-    if match:
-        try:
-            parsed = json.loads(match.group())
-            return [str(nid) for nid in parsed if isinstance(nid, (str, int))]
-        except json.JSONDecodeError:
-            pass
-    return []
-
-
-# ---------------------------------------------------------------------------
 # Custom Tool — Tree Retrieval
 # ---------------------------------------------------------------------------
 
@@ -193,24 +99,10 @@ def retrieve_context(question: str) -> str:
     if not doc_id or not settings:
         return "Error: Document context not configured."
 
-    tree_index = _get_tree_index(doc_id)
-
-    if tree_index and tree_index.get('structure'):
-        node_ids = _select_nodes_sync(tree_index, question, settings)
-
-        if isinstance(node_ids, list) and len(node_ids) == 0:
-            return "No relevant sections found in the document for this question."
-
-        nodes = find_nodes_by_ids(tree_index['structure'], node_ids)
-        if nodes:
-            return _build_context_from_nodes(nodes)
-
-    # Fallback: no tree index → use raw content
-    content = _get_document_content(doc_id)
-    if content:
-        return content[:MAX_CONTEXT_CHARS]
-
-    return "Document content is empty or not yet processed."
+    context = retrieval.retrieve_context(doc_id, question, settings)
+    if context:
+        return context
+    return "No relevant sections found in the document for this question."
 
 
 # ---------------------------------------------------------------------------
@@ -235,35 +127,47 @@ def _ensure_memory_dir() -> None:
 # ---------------------------------------------------------------------------
 
 _checkpointer: MemorySaver | None = None
-_store: InMemoryStore | None = None
+_store: BaseStore | None = None
+_store_conn: sqlite3.Connection | None = None
 
 
 async def _get_checkpointer() -> MemorySaver:
-    """Get or create the MemorySaver checkpointer."""
+    """Get or create the conversation checkpointer.
+
+    Stays in-memory by design: the durable display history lives in the
+    ``chat_messages`` SQLite table, so the checkpointer only needs to hold
+    the active session's working memory. (A persistent ``AsyncSqliteSaver``
+    was tried previously but its context-manager API is incompatible with the
+    long-lived singleton agent — see docs/plans/e2e-issues.md.)
+    """
     global _checkpointer
     if _checkpointer is None:
         _checkpointer = MemorySaver()
     return _checkpointer
 
 
-def _get_store() -> InMemoryStore:
-    """Get or create the in-memory store for StoreBackend."""
-    global _store
+def _get_store() -> BaseStore:
+    """Get or create the durable long-term memory store.
+
+    Backed by SQLite so learned user preferences survive restarts. Uses a
+    plain ``sqlite3.Connection`` (not ``from_conn_string``) in autocommit
+    mode — ``SqliteStore`` issues explicit ``BEGIN`` statements, which clash
+    with the default implicit-transaction connection.
+    """
+    global _store, _store_conn
     if _store is None:
-        _store = InMemoryStore()
+        STORE_DB.parent.mkdir(parents=True, exist_ok=True)
+        _store_conn = sqlite3.connect(
+            str(STORE_DB), check_same_thread=False, isolation_level=None
+        )
+        _store = SqliteStore(_store_conn)
+        _store.setup()
     return _store
 
 
 def _create_model(settings: Settings):
-    """Create a LangChain chat model from LAIDocs settings."""
-    return init_chat_model(
-        model=settings.active_llm.model,
-        model_provider="openai",
-        base_url=settings.active_llm.base_url or None,
-        api_key=settings.active_llm.api_key or "sk-placeholder",
-        max_retries=3,
-        timeout=120,
-    )
+    """Create a LangChain chat model from LAIDocs settings (any provider)."""
+    return create_chat_model(settings.active_llm)
 
 
 _agent: CompiledStateGraph | None = None

@@ -5,7 +5,6 @@ from __future__ import annotations
 from typing import Any
 
 from fastapi import APIRouter, HTTPException
-from openai import OpenAI
 from pydantic import BaseModel
 
 from ..core.config import get_settings, reload_settings
@@ -27,6 +26,7 @@ class _SettingsUpdate(BaseModel):
 
 
 class _TestRequest(BaseModel):
+    provider: str = ""
     base_url: str = ""
     api_key: str = ""
     model: str = ""
@@ -78,21 +78,26 @@ async def update_settings(body: _SettingsUpdate):
 
 @router.post("/test-llm")
 async def test_llm(body: _TestRequest):
-    """Send a tiny chat-completion request to validate LLM credentials."""
+    """Send a tiny chat request to validate LLM credentials (any provider)."""
+    from ..core.config import LLMConfig
+    from ..services.llm import create_chat_model, is_llm_configured
+
     s = get_settings()
-    base_url = body.base_url or s.active_llm.base_url
-    api_key = body.api_key or s.active_llm.api_key
-    model = body.model or s.active_llm.model
-    if not all([base_url, api_key, model]):
-        raise HTTPException(status_code=400, detail="LLM base_url, api_key, and model are required")
-    try:
-        client = OpenAI(base_url=base_url, api_key=api_key)
-        resp = client.chat.completions.create(
-            model=model,
-            messages=[{"role": "user", "content": "Say hello in one word."}],
-            max_tokens=10,
+    cfg = LLMConfig(
+        provider=body.provider or s.active_llm.provider,
+        base_url=body.base_url or s.active_llm.base_url,
+        api_key=body.api_key or s.active_llm.api_key,
+        model=body.model or s.active_llm.model,
+    )
+    if not is_llm_configured(cfg):
+        raise HTTPException(
+            status_code=400,
+            detail="LLM model and credentials (api_key or base_url) are required",
         )
-        reply = resp.choices[0].message.content if resp.choices else ""
+    try:
+        model = create_chat_model(cfg, max_tokens=10)
+        resp = model.invoke([{"role": "user", "content": "Say hello in one word."}])
+        reply = resp.content if isinstance(resp.content, str) else str(resp.content)
         return {"success": True, "response": reply}
     except Exception as exc:
         return {"success": False, "error": str(exc)}

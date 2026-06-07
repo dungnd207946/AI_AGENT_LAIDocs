@@ -13,6 +13,9 @@ CONFIG_PATH = LAIDOCS_HOME / "config.json"
 
 
 class LLMConfig(BaseModel):
+    # provider: "" resolves to "openai". Supported: "openai" (OpenAI-compatible,
+    # incl. local/Ollama/LM Studio), "gemini" (Google), "anthropic".
+    provider: str = ""
     base_url: str = ""
     api_key: str = ""
     model: str = ""
@@ -26,6 +29,7 @@ class Settings(BaseSettings):
     telemetry_url: str = "http://localhost:8001/api/v1/track"
     telemetry_enabled: bool = True
 
+    default_llm_provider: str = ""
     default_llm_base_url: str = ""
     default_llm_api_key: str = ""
     default_llm_model: str = ""
@@ -33,9 +37,10 @@ class Settings(BaseSettings):
     @property
     def active_llm(self) -> LLMConfig:
         return LLMConfig(
+            provider=self.llm.provider or self.default_llm_provider,
             base_url=self.llm.base_url or self.default_llm_base_url,
             api_key=self.llm.api_key or self.default_llm_api_key,
-            model=self.llm.model or self.default_llm_model
+            model=self.llm.model or self.default_llm_model,
         )
 
     model_config = SettingsConfigDict(

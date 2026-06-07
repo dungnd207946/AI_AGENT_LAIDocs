@@ -64,7 +64,8 @@ async def chat_stream(body: ChatRequest):
     The agent uses Tree Reasoning retrieval to ground answers in the document.
     """
     settings = get_settings()
-    if not settings.active_llm.model or not settings.active_llm.base_url:
+    from ..services.llm import is_llm_configured
+    if not is_llm_configured(settings.active_llm):
         raise HTTPException(
             status_code=503,
             detail="LLM is not configured. Please set the LLM endpoint in Settings.",
