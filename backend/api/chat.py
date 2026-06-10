@@ -30,6 +30,25 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/chat", tags=["chat"])
 
 
+def _content_to_text(content) -> str:
+    """Normalize LangChain message content blocks into plain streamed text."""
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict):
+                value = item.get("text") or item.get("content")
+                if isinstance(value, str):
+                    parts.append(value)
+        return "".join(parts)
+    return str(content)
+
+
 # ---------------------------------------------------------------------------
 # Request / response models
 # ---------------------------------------------------------------------------
@@ -139,7 +158,9 @@ async def chat_stream(body: ChatRequest):
                     and hasattr(message_obj, 'content') and message_obj.content
                     and not getattr(message_obj, 'tool_call_chunks', None)
                 ):
-                    token = message_obj.content
+                    token = _content_to_text(message_obj.content)
+                    if not token:
+                        continue
                     full_response += token
                     escaped = token.replace("\n", "\\n")
                     yield f"data: {escaped}\n\n"
