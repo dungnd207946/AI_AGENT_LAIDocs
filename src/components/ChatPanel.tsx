@@ -95,9 +95,10 @@ function MessageBubble({ message }: { message: Message }) {
 interface ChatPanelProps {
   docId: string;
   onClose: () => void;
+  onDocumentEdited?: () => void;
 }
 
-export default function ChatPanel({ docId, onClose }: ChatPanelProps) {
+export default function ChatPanel({ docId, onClose, onDocumentEdited }: ChatPanelProps) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [streaming, setStreaming] = useState(false);
@@ -166,7 +167,7 @@ export default function ChatPanel({ docId, onClose }: ChatPanelProps) {
         setMessages((prev) =>
           prev.map((m) => m.id === assistantMsg.id ? { ...m, content: m.content + token } : m)
         );
-      }, sessionId);
+      }, sessionId, onDocumentEdited);
     } catch (err) {
       setError(String(err));
       setMessages((prev) => prev.filter((m) => m.id !== assistantMsg.id));
@@ -176,7 +177,7 @@ export default function ChatPanel({ docId, onClose }: ChatPanelProps) {
       );
       setStreaming(false);
     }
-  }, [docId, input, streaming, sessionId]);
+  }, [docId, input, streaming, sessionId, onDocumentEdited]);
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendMessage(); }

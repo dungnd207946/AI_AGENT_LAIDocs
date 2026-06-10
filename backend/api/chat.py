@@ -16,7 +16,12 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from ..core.config import get_settings
-from ..services.agent import get_document_agent, set_tool_context, reset_agent
+from ..services.agent import (
+    get_document_agent,
+    set_tool_context,
+    reset_agent,
+    document_was_edited,
+)
 from ..services.chat_history import (
     get_current_session_id,
     get_messages,
@@ -87,7 +92,13 @@ async def chat_stream(body: ChatRequest):
             config = {
                 "configurable": {
                     "thread_id": f"doc-{body.doc_id}-s{session_id}",
-                }
+                },
+                "run_name": "document-chat",
+                "metadata": {
+                    "doc_id": body.doc_id,
+                    "session_id": session_id,
+                },
+                "tags": ["ai-agent-chatbot"],
             }
 
             stream_input = {
@@ -141,6 +152,9 @@ async def chat_stream(body: ChatRequest):
                     save_message(body.doc_id, session_id, "assistant", full_response)
                 except Exception:
                     logger.exception("Failed to save chat history")
+            # Signal the frontend to reload the document if the agent edited it
+            if document_was_edited():
+                yield "data: [EDITED]\n\n"
             yield "data: [DONE]\n\n"
 
     return StreamingResponse(

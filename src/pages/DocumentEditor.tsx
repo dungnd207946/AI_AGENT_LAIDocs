@@ -232,6 +232,22 @@ export default function DocumentEditor() {
     debounceRef.current = setTimeout(() => saveContent(newContent), 1000);
   }, [doc?.content, saveContent]);
 
+  // Re-fetch the document after the chat agent edits it, so the editor shows
+  // the new content. Cancels any pending auto-save to avoid clobbering the
+  // server's just-written content.
+  const reloadDocument = useCallback(async () => {
+    if (!id) return;
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+    try {
+      const data = await apiGet<Document>(`/api/documents/${id}`);
+      setDoc(data);
+      setContent(data.content);
+      setSaveStatus("saved");
+    } catch {
+      /* leave current content in place on reload failure */
+    }
+  }, [id]);
+
   useEffect(() => () => { if (debounceRef.current) clearTimeout(debounceRef.current); }, []);
 
   const handleEditorClick = useCallback((e: React.MouseEvent) => {
@@ -523,7 +539,7 @@ export default function DocumentEditor() {
               onMouseLeave={(e) => { if (!isChatDragging) e.currentTarget.style.background = "transparent"; }}
             />
             <div style={{ flex: 1, overflow: "hidden" }}>
-              <ChatPanel key={id} docId={id} onClose={() => { chatHasAnimated.current = false; setShowChat(false); }} />
+              <ChatPanel key={id} docId={id} onDocumentEdited={reloadDocument} onClose={() => { chatHasAnimated.current = false; setShowChat(false); }} />
             </div>
           </div>
         )}

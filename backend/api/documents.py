@@ -22,6 +22,7 @@ from ..core.database import get_db
 from ..core.vault import vault, ASSETS_DIR
 from ..services.converter import DoclingConverter
 from ..services.crawler import WebCrawler
+from ..services.document_store import rebuild_tree_index
 from ..services.tree_index import build_tree_index
 
 
@@ -422,16 +423,8 @@ async def update_document(doc_id: str, body: dict, background_tasks: BackgroundT
             (markdown, new_title, new_filename, doc_id),
         )
 
-    # Rebuild tree index in background
-    async def _rebuild_tree(did: str, md: str):
-        tree = await build_tree_index(md)
-        with get_db() as conn:
-            conn.execute(
-                "UPDATE documents SET tree_index=? WHERE id=?",
-                (json.dumps(tree, ensure_ascii=False) if tree else None, did),
-            )
-
-    background_tasks.add_task(_rebuild_tree, doc_id, markdown)
+    # Rebuild tree index in background (shared write path — see document_store)
+    background_tasks.add_task(rebuild_tree_index, doc_id, markdown)
 
     return {"id": doc_id, "updated": True}
 
