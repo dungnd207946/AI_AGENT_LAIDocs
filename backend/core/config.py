@@ -22,6 +22,7 @@ class Settings(BaseSettings):
     """LAIDocs application settings persisted to ~/.laidocs/config.json and loaded from .env."""
 
     llm: LLMConfig = LLMConfig()
+    vlm: LLMConfig = LLMConfig()
     port: int = 8008
     telemetry_url: str = "http://localhost:8001/api/v1/track"
     telemetry_enabled: bool = True
@@ -30,12 +31,24 @@ class Settings(BaseSettings):
     default_llm_api_key: str = ""
     default_llm_model: str = ""
 
+    default_vlm_base_url: str = ""
+    default_vlm_api_key: str = ""
+    default_vlm_model: str = ""
+
     @property
     def active_llm(self) -> LLMConfig:
         return LLMConfig(
             base_url=self.llm.base_url or self.default_llm_base_url,
             api_key=self.llm.api_key or self.default_llm_api_key,
             model=self.llm.model or self.default_llm_model
+        )
+
+    @property
+    def active_vlm(self) -> LLMConfig:
+        return LLMConfig(
+            base_url=self.vlm.base_url or self.default_vlm_base_url,
+            api_key=self.vlm.api_key or self.default_vlm_api_key,
+            model=self.vlm.model or self.default_vlm_model
         )
 
     model_config = SettingsConfigDict(

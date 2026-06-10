@@ -86,16 +86,28 @@ async def chat_stream(body: ChatRequest):
             config = {
                 "configurable": {
                     "thread_id": f"doc-{body.doc_id}-s{session_id}",
-                }
+                },
+                "run_name": "document-chat",
+                "metadata": {
+                    "doc_id": body.doc_id,
+                    "session_id": session_id,
+                },
+                "tags": ["ai-agent-chatbot"],
             }
 
             # Provide preferences file content if it exists
+            from datetime import datetime
             from ..services.agent import PREFERENCES_FILE
             files = {}
             if PREFERENCES_FILE.exists():
                 files["/memories/preferences.md"] = {
                     "content": PREFERENCES_FILE.read_text(encoding="utf-8"),
                     "encoding": "utf-8",
+                    # DeepAgents' _glob_search_files reads file_data["modified_at"]
+                    # unconditionally; omitting it crashes the agent's filesystem tools.
+                    "modified_at": datetime.fromtimestamp(
+                        PREFERENCES_FILE.stat().st_mtime
+                    ).isoformat(),
                 }
 
             stream_input = {
