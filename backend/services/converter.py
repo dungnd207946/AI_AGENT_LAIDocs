@@ -20,6 +20,8 @@ from docling.datamodel.base_models import ConversionStatus, InputFormat
 from docling.datamodel.pipeline_options import (
     PdfPipelineOptions,
     PictureDescriptionApiOptions,
+    AcceleratorOptions,
+    AcceleratorDevice,
 )
 from docling.document_converter import (
     DocumentConverter as _DoclingConverter,
@@ -61,10 +63,17 @@ def _build_docling_converter(settings) -> _DoclingConverter:
     llm_configured = bool(settings.active_llm.base_url and settings.active_llm.model)
 
     pdf_options = PdfPipelineOptions(
-        generate_picture_images=True,
-        images_scale=2.0,
+        # Only generate full-res picture images when VLM will actually use them.
+        # images_scale=1.0 (from 2.0) halves linear resolution → 4× less memory
+        # per page image, which prevents std::bad_alloc on complex/large pages.
+        generate_picture_images=llm_configured,
+        images_scale=1.0,
         do_picture_description=llm_configured,
         enable_remote_services=llm_configured,
+        accelerator_options=AcceleratorOptions(
+            num_threads=2,
+            device=AcceleratorDevice.CPU,
+        ),
     )
 
     if llm_configured:
@@ -192,10 +201,12 @@ class DoclingConverter:
     ) -> tuple[str, str]:
         """Convert a document using the Docling pipeline."""
         result = self._converter.convert(file_path)
-        if result.status != ConversionStatus.SUCCESS:
+        if result.status not in (ConversionStatus.SUCCESS, ConversionStatus.PARTIAL_SUCCESS):
             raise ValueError(
                 f"Docling conversion failed (status={result.status}) for: {file_path}"
             )
+        if result.status == ConversionStatus.PARTIAL_SUCCESS:
+            print(f"[converter] Warning: partial conversion for {file_path} — some pages may be missing")
         doc = result.document
 
         serializer = MarkdownDocSerializer(

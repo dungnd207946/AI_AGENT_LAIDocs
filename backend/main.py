@@ -10,6 +10,11 @@ import threading
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+# ── Load .env early — puts ALL vars (including HF_TOKEN) into os.environ
+# before any model library (HuggingFace / docling / torch) is imported.
+from dotenv import load_dotenv, find_dotenv
+load_dotenv(find_dotenv(usecwd=True), override=False)
+
 # ── UTF-8 handling (critical on Windows) ───────────────────────────
 os.environ.setdefault("PYTHONUTF8", "1")
 if hasattr(sys.stdout, "reconfigure"):

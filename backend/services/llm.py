@@ -96,7 +96,7 @@ def create_chat_model(
 
 # Provider defaults for embedding models.
 _DEFAULT_EMBED_MODEL = {
-    "google_genai": "models/text-embedding-004",
+    "google_genai": "gemini-embedding-001",
     "openai": "text-embedding-3-small",
 }
 
