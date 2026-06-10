@@ -13,12 +13,14 @@ import asyncio
 import contextvars
 import json
 import logging
+import re
 from pathlib import Path
 from typing import Any
 
 from deepagents import create_deep_agent
 from deepagents.backends import StateBackend, CompositeBackend
 from deepagents.backends.store import StoreBackend
+from langchain.agents.middleware import dynamic_prompt
 from langchain.chat_models import init_chat_model
 from langchain_core.messages import HumanMessage
 from langchain_core.tools import tool
@@ -29,6 +31,7 @@ from langgraph.store.memory import InMemoryStore
 from ..core.config import LLMConfig, Settings, get_settings, LAIDOCS_HOME
 from ..core.database import get_db
 from ..core.vault import ensure_assets_dir
+from ..services.document_store import persist_document_content
 from ..services.tree_index import find_nodes_by_ids, remove_fields
 
 logger = logging.getLogger(__name__)
@@ -63,8 +66,8 @@ MUST be `retrieve_context`. Never answer from memory alone.
 5. **The document is NOT a file you can browse**: Your filesystem tools \
 (`ls`, `glob`, `grep`, `read_file`) only see your private scratch and `/memories/` \
 space — they will NEVER contain the user's document. NEVER use them to find, locate, \
-or read the document, and NEVER tell the user "no document exists" based on a file \
-listing. The ONLY way to access the document's content is the `retrieve_context` tool. \
+read, OR EDIT the document, and NEVER tell the user "no document exists" (or ask \
+"which file?") based on a file listing. The ONLY way to access the document's content is the `retrieve_context` tool. \
 If you feel the urge to "look for the file", call `retrieve_context` instead.
 
 ## Reading Images
@@ -77,6 +80,36 @@ prompt describing what to read.
 never invent or guess image paths.
 - Treat the vision model's answer as part of the document content (it is still \
 document-grounded); cite the image (e.g. "Image 1") in your answer.
+
+## Editing the Document
+You CAN edit the document — but ONLY when the user explicitly asks you to change it
+(add, modify, or delete content). Editing uses two dedicated tools, NOT your filesystem tools.
+
+**Which document you edit (READ THIS FIRST):** Edits ALWAYS target the CURRENT document — \
+the very SAME one `retrieve_context` reads. There is exactly ONE document in this \
+conversation. You do NOT need, and will NOT be given, a filename or file path: the edit \
+tools already point at the current document. So:
+- NEVER use your filesystem tools (`ls`, `glob`, `read_file`, `write_file`) to look for, \
+choose, or create a file to edit — they only see your private scratch and `/memories/`, \
+NEVER the user's document (see Core Rule 5).
+- NEVER ask the user "which file?" and NEVER create a new file. When the user says \
+"add/edit/delete ... in the file/document", they mean THIS document — edit it in place \
+with the tools below. If you feel the urge to "find the file", call `retrieve_context` instead.
+
+1. **Preview first**: ALWAYS call `preview_edit` first. It locates the exact text in the \
+real document and returns the precise snippet that will change, plus the replacement.
+2. **Confirm with the user**: Show the user the previewed change and ask for explicit \
+confirmation. NEVER apply an edit without it. If the user has not clearly approved, do not \
+call `apply_edit`.
+3. **Apply**: Only after the user clearly agrees, call `apply_edit` with the SAME \
+`old_string`/`new_string` you previewed.
+- `old_string` must come from `retrieve_context` or `preview_edit` — do NOT include the \
+`[Section: ...]` header line, and never invent text.
+- If `preview_edit` reports "not found" or "not unique", call `retrieve_context` to get more \
+surrounding context, then retry with a longer, more distinctive `old_string`.
+- **Delete** = pass an empty `new_string`. **Add** = use an existing passage as an anchor \
+and append the new content to it (e.g. `old_string` = the anchor, `new_string` = anchor + \
+new text). Never overwrite anything beyond what the user asked for.
 
 ## Response Style
 - Be concise and well-structured (use headers, bullets, bold for key terms)
@@ -122,6 +155,31 @@ def _get_document_content(doc_id: str) -> str | None:
             "SELECT content FROM documents WHERE id=?", (doc_id,)
         ).fetchone()
     return row[0] if row and row[0] else None
+
+
+def _get_document_meta(doc_id: str) -> dict | None:
+    """Load lightweight identity (title/filename/folder) for the current document."""
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT title, filename, folder FROM documents WHERE id=?", (doc_id,)
+        ).fetchone()
+    if not row:
+        return None
+    return {"title": row[0] or "", "filename": row[1] or "", "folder": row[2] or ""}
+
+
+def _build_outline(structure: list[dict], depth: int = 0, acc: list[str] | None = None) -> list[str]:
+    """Flatten the tree-index structure into an indented list of section titles."""
+    if acc is None:
+        acc = []
+    for node in structure:
+        title = node.get("title")
+        if title:
+            acc.append("  " * depth + "- " + title)
+        children = node.get("nodes")
+        if children:
+            _build_outline(children, depth + 1, acc)
+    return acc
 
 
 def _build_context_from_nodes(nodes: list[dict]) -> str:
@@ -304,6 +362,160 @@ def read_image(image_path: str, prompt: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Custom Tools — Document Editing (old_string / new_string)
+# ---------------------------------------------------------------------------
+
+
+def _normalize_with_map(s: str) -> tuple[str, list[int]]:
+    """Collapse each whitespace run to a single space, keeping a raw-offset map.
+
+    Returns ``(normalized, offsets)`` where ``offsets[i]`` is the index in *s*
+    of the first raw character backing normalized character ``i``. Used to map a
+    match found in whitespace-normalized text back to the exact raw span.
+    """
+    chars: list[str] = []
+    offsets: list[int] = []
+    i, n = 0, len(s)
+    while i < n:
+        if s[i].isspace():
+            start = i
+            while i < n and s[i].isspace():
+                i += 1
+            chars.append(" ")
+            offsets.append(start)
+        else:
+            chars.append(s[i])
+            offsets.append(i)
+            i += 1
+    return "".join(chars), offsets
+
+
+def _locate_in_content(content: str, old_string: str) -> tuple[int, int] | str:
+    """Find the raw ``(start, end)`` span in *content* matching *old_string*.
+
+    Tries an exact match first; if that fails, falls back to a whitespace-
+    normalized match so the agent's ``old_string`` tolerates differences in
+    spacing/newlines (and an accidental ``[Section: ...]`` header is stripped by
+    normalization mismatch surfacing as "not found", prompting a retry).
+
+    The match must be UNIQUE. Returns a span tuple, or an error string suitable
+    for returning straight to the agent.
+    """
+    if not old_string:
+        return "Error: old_string is empty."
+
+    # 1) Exact match
+    exact = content.count(old_string)
+    if exact == 1:
+        start = content.index(old_string)
+        return (start, start + len(old_string))
+    if exact > 1:
+        return (
+            f"Error: the text appears {exact} times — add more surrounding "
+            "context so it identifies a single, unique location."
+        )
+
+    # 2) Whitespace-normalized match
+    norm_old = re.sub(r"\s+", " ", old_string).strip()
+    if not norm_old:
+        return "Error: old_string is only whitespace."
+    norm_content, offsets = _normalize_with_map(content)
+    occurrences = [m.start() for m in re.finditer(re.escape(norm_old), norm_content)]
+    if not occurrences:
+        return (
+            "Error: text not found in the document. Use retrieve_context to get the "
+            "exact wording, then retry (do not include the '[Section: ...]' header)."
+        )
+    if len(occurrences) > 1:
+        return (
+            f"Error: the text matches {len(occurrences)} places after normalization — "
+            "add more surrounding context so it is unique."
+        )
+    a = occurrences[0]
+    b = a + len(norm_old)
+    raw_start = offsets[a]
+    raw_end = offsets[b - 1] + 1  # last normalized char is non-space (norm_old is stripped)
+    return (raw_start, raw_end)
+
+
+@tool
+def preview_edit(old_string: str, new_string: str) -> str:
+    """Preview an edit to the document BEFORE applying it (read-only).
+
+    ALWAYS call this before `apply_edit`. It locates `old_string` in the real
+    document and returns the EXACT snippet that would be replaced, plus the
+    replacement — so you can show the user precisely what will change and ask for
+    confirmation. This tool never modifies the document.
+
+    Args:
+        old_string: The exact text to find (from retrieve_context / the document).
+            Do NOT include the "[Section: ...]" header line.
+        new_string: The replacement text. Pass an empty string to DELETE the match.
+    """
+    ctx = _tool_context_var.get()
+    doc_id = ctx.get("doc_id", "")
+    if not doc_id:
+        return "Error: Document context not configured."
+
+    content = _get_document_content(doc_id)
+    if not content:
+        return "Error: Document content is empty or not yet processed."
+
+    located = _locate_in_content(content, old_string)
+    if isinstance(located, str):
+        return located  # error message
+
+    start, end = located
+    matched = content[start:end]
+    action = "DELETE" if new_string == "" else "REPLACE"
+    return (
+        f"Preview ({action}) — ask the user to confirm before calling apply_edit.\n\n"
+        f"--- Text that will be removed (exact) ---\n{matched}\n"
+        f"--- Replaced with ---\n{new_string if new_string else '(deleted)'}\n"
+    )
+
+
+@tool
+async def apply_edit(old_string: str, new_string: str) -> str:
+    """Apply a previewed, USER-CONFIRMED edit to the document.
+
+    Only call this AFTER `preview_edit` and AFTER the user has explicitly approved
+    the change. Pass the SAME `old_string`/`new_string` you previewed. Writes the
+    new content to the document's file, database, and search index.
+
+    Args:
+        old_string: The exact text to replace (same as previewed). Do NOT include
+            the "[Section: ...]" header line.
+        new_string: The replacement text. Empty string deletes the match.
+    """
+    ctx = _tool_context_var.get()
+    doc_id = ctx.get("doc_id", "")
+    if not doc_id:
+        return "Error: Document context not configured."
+
+    content = _get_document_content(doc_id)
+    if not content:
+        return "Error: Document content is empty or not yet processed."
+
+    located = _locate_in_content(content, old_string)
+    if isinstance(located, str):
+        return located  # error message
+
+    start, end = located
+    new_content = content[:start] + new_string + content[end:]
+    try:
+        await persist_document_content(doc_id, new_content)
+    except Exception as exc:  # noqa: BLE001 — surface to agent, don't crash stream
+        return f"Error applying edit: {exc}"
+
+    # Mark this request as having edited the document, so the chat stream can
+    # signal the frontend to reload. Mutating the shared dict (rather than a
+    # separate ContextVar) keeps the flag visible across tool-execution contexts.
+    ctx["edited"] = True
+    return "Edit applied successfully. The document has been updated."
+
+
+# ---------------------------------------------------------------------------
 # Memory initialization
 # ---------------------------------------------------------------------------
 
@@ -318,6 +530,59 @@ def _ensure_memory_dir() -> None:
         )
 
 
+
+
+# ---------------------------------------------------------------------------
+# Dynamic system prompt — inject the current document's identity every turn
+# ---------------------------------------------------------------------------
+
+DOC_OUTLINE_CHAR_CAP = 1500
+
+
+def _build_document_system_prompt(base: str, doc_id: str) -> str:
+    """Append a "Current Document" block (title, path, section outline) to *base*.
+
+    Gives the agent persistent awareness of which document it is working on, so
+    it never has to call a tool just to discover the file or ask the user.
+    """
+    if not doc_id:
+        return base
+    meta = _get_document_meta(doc_id)
+    if not meta:
+        return base
+
+    lines = [
+        "",
+        "## Current Document (you are ALREADY working on this — do NOT look it up)",
+        f"- Title: {meta['title']}",
+        f"- File: {meta['folder']}/{meta['filename']}",
+    ]
+    tree = _get_tree_index(doc_id)
+    if tree and tree.get("structure"):
+        outline = "\n".join(_build_outline(tree["structure"]))
+        if outline:
+            if len(outline) > DOC_OUTLINE_CHAR_CAP:
+                outline = outline[:DOC_OUTLINE_CHAR_CAP] + "\n  …(outline truncated)"
+            lines.append("- Section outline:\n" + outline)
+    lines.append(
+        "Every retrieve_context / preview_edit / apply_edit call operates on THIS "
+        "document — it is the only document in this conversation. Never ask the user "
+        "which file, and never create a new file."
+    )
+    return base + "\n" + "\n".join(lines)
+
+
+@dynamic_prompt
+def _current_document_prompt(request) -> str:
+    """Per-request system prompt: SOUL + the current document's identity.
+
+    Reads the per-request doc_id from the contextvar set by ``set_tool_context``
+    (the same mechanism the retrieval/edit tools use). Appends to whatever system
+    prompt is already on the request so it composes with other middleware.
+    """
+    base = getattr(request, "system_prompt", None) or DOCUMENT_SOUL_PROMPT
+    doc_id = _tool_context_var.get().get("doc_id", "")
+    return _build_document_system_prompt(base, doc_id)
 
 
 # ---------------------------------------------------------------------------
@@ -392,8 +657,9 @@ async def get_document_agent() -> CompiledStateGraph:
 
     _agent = create_deep_agent(
         model=model,
-        tools=[retrieve_context, read_image],
+        tools=[retrieve_context, read_image, preview_edit, apply_edit],
         system_prompt=DOCUMENT_SOUL_PROMPT,
+        middleware=[_current_document_prompt],
         memory=["/memories/preferences.md"],
         backend=backend,
         checkpointer=checkpointer,
@@ -409,9 +675,19 @@ def set_tool_context(doc_id: str, settings: Settings) -> None:
 
     Must be called before invoking the agent so the retrieve_context
     tool knows which document to search. Uses contextvars for safe
-    concurrent request isolation.
+    concurrent request isolation. The ``edited`` flag starts False and is
+    flipped by ``apply_edit`` so the chat stream can signal a frontend reload.
     """
-    _tool_context_var.set({"doc_id": doc_id, "settings": settings})
+    _tool_context_var.set({"doc_id": doc_id, "settings": settings, "edited": False})
+
+
+def document_was_edited() -> bool:
+    """Return True if apply_edit ran during the current request's context.
+
+    Reads the shared per-request dict set by ``set_tool_context``; ``apply_edit``
+    mutates that same dict in place, so the flag is visible here after streaming.
+    """
+    return bool(_tool_context_var.get().get("edited", False))
 
 
 def reset_agent() -> None:

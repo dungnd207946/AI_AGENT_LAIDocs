@@ -54,6 +54,7 @@ export async function streamChat(
   question: string,
   onChunk: (text: string) => void,
   sessionId?: number,
+  onEdited?: () => void,
 ): Promise<void> {
   const res = await fetch(`${API_BASE}/api/chat/stream`, {
     method: "POST",
@@ -84,6 +85,11 @@ export async function streamChat(
         if (!trimmed.startsWith("data: ")) continue;
         const payload = trimmed.slice(6);
         if (payload === "[DONE]") return;
+        if (payload === "[EDITED]") {
+          // Agent edited the document — let the caller reload it
+          onEdited?.();
+          continue;
+        }
         if (payload.startsWith("[ERROR]")) throw new Error(payload.slice(8));
         // Tokens are plain text with escaped newlines
         onChunk(payload.replace(/\\n/g, "\n"));
