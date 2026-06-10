@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect, useCallback } from "react";
+import React, { useState, useRef, useEffect, useCallback, useMemo } from "react";
 import { streamChat, getChatHistory, startNewSession, clearChatHistory } from "../lib/sidecar";
 import MarkdownPreview from "./MarkdownPreview";
 
@@ -107,9 +107,34 @@ export default function ChatPanel({ docId, onClose, onDocumentEdited }: ChatPane
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
+  // Show one conversation at a time: only the active session's messages.
+  const visibleMessages = useMemo(
+    () => messages.filter((m) => (m.sessionId ?? 1) === sessionId),
+    [messages, sessionId],
+  );
+
+  // Every session that exists for this doc, plus the active one (a freshly
+  // created session has no saved messages yet but must still be selectable).
+  const sessionList = useMemo(() => {
+    const ids = new Set<number>(messages.map((m) => m.sessionId ?? 1));
+    ids.add(sessionId);
+    return Array.from(ids).sort((a, b) => a - b);
+  }, [messages, sessionId]);
+
+  // Label a session by its first user message so switching is meaningful.
+  const sessionLabel = useCallback(
+    (sid: number): string => {
+      const firstUser = messages.find((m) => (m.sessionId ?? 1) === sid && m.role === "user");
+      if (!firstUser) return `Session ${sid} · empty`;
+      const snippet = firstUser.content.trim().replace(/\s+/g, " ").slice(0, 32);
+      return `Session ${sid} · ${snippet}${firstUser.content.length > 32 ? "…" : ""}`;
+    },
+    [messages],
+  );
+
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
-  }, [messages, input]); // also scroll when input changes if needed
+  }, [visibleMessages, input]); // also scroll when input changes if needed
 
   useEffect(() => { inputRef.current?.focus(); }, []);
 
@@ -216,9 +241,29 @@ export default function ChatPanel({ docId, onClose, onDocumentEdited }: ChatPane
         </div>
       </div>
 
+      {/* Session switcher — resume any past conversation */}
+      {sessionList.length > 1 && (
+        <div className="flex items-center gap-2 px-4 py-2 border-b border-[var(--border)] shrink-0 bg-[var(--surface-glass)] backdrop-blur-md z-10">
+          <span className="text-[10px] uppercase tracking-wide text-[var(--text-faint)] shrink-0">
+            Conversation
+          </span>
+          <select
+            value={sessionId}
+            onChange={(e) => setSessionId(Number(e.target.value))}
+            disabled={streaming}
+            title="Switch to a previous conversation"
+            className="flex-1 min-w-0 bg-[var(--surface-alt)] border border-[var(--border-strong)] rounded-lg text-[12px] text-[var(--text-primary)] px-2 py-1 outline-none focus:border-[var(--accent)] cursor-pointer disabled:opacity-50"
+          >
+            {sessionList.map((sid) => (
+              <option key={sid} value={sid}>{sessionLabel(sid)}</option>
+            ))}
+          </select>
+        </div>
+      )}
+
       {/* Messages */}
       <div ref={scrollRef} className="flex-1 overflow-y-auto p-4 flex flex-col gap-5 pb-40">
-        {messages.length === 0 && (
+        {visibleMessages.length === 0 && (
           <div className="flex flex-col items-center justify-center h-full text-center px-4 py-12 fade-in">
             <div className="w-12 h-12 rounded-2xl bg-[var(--accent-subtle)] border border-[var(--border-glow)] flex items-center justify-center mb-5 glow-pulse text-[var(--accent-text)]">
               <IconBot />
@@ -232,22 +277,9 @@ export default function ChatPanel({ docId, onClose, onDocumentEdited }: ChatPane
           </div>
         )}
 
-        {messages.map((msg, idx) => {
-          const prevSession = idx > 0 ? messages[idx - 1].sessionId : msg.sessionId;
-          const showDivider = msg.sessionId !== prevSession;
-          return (
-            <React.Fragment key={msg.id}>
-              {showDivider && (
-                <div className="flex items-center gap-2 py-2 text-[var(--text-faint)] text-[10px] uppercase tracking-wide">
-                  <div className="flex-1 h-px bg-[var(--border)]" />
-                  <span>New Session</span>
-                  <div className="flex-1 h-px bg-[var(--border)]" />
-                </div>
-              )}
-              <MessageBubble message={msg} />
-            </React.Fragment>
-          );
-        })}
+        {visibleMessages.map((msg) => (
+          <MessageBubble key={msg.id} message={msg} />
+        ))}
 
         {error && (
           <div className="p-3 rounded-lg border border-[rgba(248,113,113,0.2)] bg-[var(--error-bg)] text-xs text-[var(--error)] fade-in">
