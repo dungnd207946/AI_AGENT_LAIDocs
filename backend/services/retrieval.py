@@ -15,6 +15,7 @@ and all LLM calls go through the provider-agnostic factory in ``llm.py``.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
@@ -79,6 +80,26 @@ def get_document_content(doc_id: str) -> str | None:
             "SELECT content FROM documents WHERE id=?", (doc_id,)
         ).fetchone()
     return row[0] if row and row[0] else None
+
+
+def _get_document_state(doc_id: str) -> tuple[str | None, dict | None]:
+    """Load current document content + tree JSON in one DB round-trip."""
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT content, tree_index FROM documents WHERE id=?",
+            (doc_id,),
+        ).fetchone()
+    if not row:
+        return None, None
+
+    content = row["content"] if row["content"] else None
+    tree = None
+    if row["tree_index"]:
+        try:
+            tree = json.loads(row["tree_index"])
+        except (json.JSONDecodeError, TypeError):
+            tree = None
+    return content, tree
 
 
 # ---------------------------------------------------------------------------
@@ -156,9 +177,17 @@ def get_retrieval_units(doc_id: str) -> list[dict]:
     they never collide with tree node ids or chunk ids.
     """
     content = get_document_content(doc_id)
-
-    base: list[dict] = []
     tree = get_tree_index(doc_id)
+    return _build_retrieval_units(doc_id, content, tree)
+
+
+def _build_retrieval_units(
+    doc_id: str,
+    content: str | None,
+    tree: dict | None,
+) -> list[dict]:
+    """Build the shared retrieval corpus from current document state."""
+    base: list[dict] = []
     if tree and tree.get("structure"):
         nodes = structure_to_list(tree["structure"])
         base = [
@@ -167,6 +196,8 @@ def get_retrieval_units(doc_id: str) -> list[dict]:
                 "title": n.get("title", "Untitled"),
                 "text": n.get("text", ""),
                 "kind": "text",
+                "heading_path": n.get("heading_path") or [],
+                "path": n.get("path") or "",
             }
             for n in nodes
             if n.get("node_id") is not None and n.get("text")
@@ -174,7 +205,14 @@ def get_retrieval_units(doc_id: str) -> list[dict]:
 
     if not base and content:
         base = [
-            {"unit_id": f"c{i + 1:04d}", "title": "", "text": chunk, "kind": "text"}
+            {
+                "unit_id": f"c{i + 1:04d}",
+                "title": "",
+                "text": chunk,
+                "kind": "text",
+                "heading_path": [],
+                "path": "",
+            }
             for i, chunk in enumerate(_chunk_text(content))
         ]
 
@@ -184,6 +222,61 @@ def get_retrieval_units(doc_id: str) -> list[dict]:
     if content:
         base.extend(get_multimodal_units(doc_id, content=content))
     return base
+
+
+def _normalize_hash_value(value: object) -> object:
+    if value is None:
+        return ""
+    if isinstance(value, list):
+        return ["" if item is None else str(item) for item in value]
+    return str(value)
+
+
+def _compute_content_hash(content: str | None) -> str:
+    payload = content if content is not None else ""
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _compute_corpus_hash(
+    doc_id: str,
+    content: str | None,
+    units: list[dict],
+    *,
+    version: int = 1,
+) -> str:
+    canonical_units = []
+    for unit in sorted(units, key=lambda item: str(item.get("unit_id") or "")):
+        canonical_units.append(
+            {
+                "unit_id": _normalize_hash_value(unit.get("unit_id")),
+                "kind": _normalize_hash_value(unit.get("kind")),
+                "title": _normalize_hash_value(unit.get("title")),
+                "heading_path": _normalize_hash_value(unit.get("heading_path") or []),
+                "path": _normalize_hash_value(unit.get("path")),
+                "text": _normalize_hash_value(unit.get("text")),
+            }
+        )
+
+    payload = {
+        "version": version,
+        "doc_id": doc_id,
+        "content_hash": _compute_content_hash(content),
+        "units": canonical_units,
+    }
+    canonical_json = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(canonical_json.encode("utf-8")).hexdigest()
+
+
+def _get_current_corpus(doc_id: str) -> tuple[str | None, list[dict], str]:
+    """Load current document state, retrieval units, and canonical corpus hash."""
+    content, tree = _get_document_state(doc_id)
+    units = _build_retrieval_units(doc_id, content, tree)
+    return content, units, _compute_corpus_hash(doc_id, content, units)
 
 
 def build_context_from_units(units: list[dict]) -> str:
@@ -301,6 +394,8 @@ def _extract_image_units(content: str) -> list[dict]:
             "title": title[:200],
             "text": text,
             "kind": "image",
+            "heading_path": [],
+            "path": "",
         })
     return units
 
@@ -340,6 +435,8 @@ def _extract_table_units(content: str) -> list[dict]:
                 "title": title[:200],
                 "text": text,
                 "kind": "table",
+                "heading_path": [],
+                "path": "",
             })
             i = j
         else:
@@ -416,35 +513,77 @@ def ensure_embedding_index(doc_id: str, settings: Settings,
     if not model:
         return False
 
-    with get_db() as conn:
-        row = conn.execute(
-            "SELECT COUNT(*) FROM document_embeddings WHERE doc_id=? AND model=?",
-            (doc_id, model),
-        ).fetchone()
-    if row and row[0]:
-        return True  # already indexed with this model
-
-    units = units if units is not None else get_retrieval_units(doc_id)
-    if not units:
+    _content_v1, units_v1, corpus_hash_v1 = _get_current_corpus(doc_id)
+    if units is not None:
+        units_v1 = units
+        corpus_hash_v1 = _compute_corpus_hash(doc_id, _content_v1, units_v1)
+    if not units_v1:
         return False
+
+    current_unit_ids = {str(u.get("unit_id") or "") for u in units_v1}
+    with get_db() as conn:
+        rows = conn.execute(
+            """SELECT unit_id, corpus_hash
+               FROM document_embeddings
+               WHERE doc_id=? AND model=?""",
+            (doc_id, model),
+        ).fetchall()
+
+    if rows:
+        matching_unit_ids = {
+            str(row["unit_id"])
+            for row in rows
+            if row["corpus_hash"] == corpus_hash_v1
+        }
+        stale_rows_present = any(
+            (row["corpus_hash"] or "") != corpus_hash_v1 for row in rows
+        )
+        if (
+            not stale_rows_present
+            and matching_unit_ids == current_unit_ids
+            and len(matching_unit_ids) == len(units_v1)
+        ):
+            return True
 
     import numpy as np
 
     embedder = create_embeddings(cfg)
-    texts = [f"{u['title']}\n{u['text']}".strip()[:8000] for u in units]
+    texts = [f"{u['title']}\n{u['text']}".strip()[:8000] for u in units_v1]
     vectors = embedder.embed_documents(texts)
 
+    content_v2, units_v2, corpus_hash_v2 = _get_current_corpus(doc_id)
+    if corpus_hash_v2 != corpus_hash_v1:
+        logger.info("Skipping stale embedding write for doc %s after corpus change", doc_id)
+        return False
+    if len(vectors) != len(units_v2):
+        logger.warning(
+            "Embedding vector count mismatch for doc %s: %s vectors for %s units",
+            doc_id,
+            len(vectors),
+            len(units_v2),
+        )
+        return False
+
     with get_db() as conn:
-        # Clear any stale rows (e.g. from a previous embedding model) first.
+        conn.execute("BEGIN")
+        # Clear any stale rows for this document before inserting the current corpus.
         conn.execute("DELETE FROM document_embeddings WHERE doc_id=?", (doc_id,))
-        for u, vec in zip(units, vectors):
+        for u, vec in zip(units_v2, vectors):
             arr = np.asarray(vec, dtype=np.float32)
             conn.execute(
                 """INSERT OR REPLACE INTO document_embeddings
-                   (doc_id, unit_id, title, chunk, model, dim, vector)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                (doc_id, u["unit_id"], u["title"], u["text"], model,
-                 int(arr.shape[0]), arr.tobytes()),
+                   (doc_id, unit_id, title, chunk, model, corpus_hash, dim, vector)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    doc_id,
+                    u["unit_id"],
+                    u["title"],
+                    u["text"],
+                    model,
+                    corpus_hash_v2,
+                    int(arr.shape[0]),
+                    arr.tobytes(),
+                ),
             )
     return True
 
@@ -454,7 +593,18 @@ def dense_search(doc_id: str, question: str, settings: Settings,
                  top_k: int = _PER_RETRIEVER_TOP_K) -> list[str]:
     """Rank units by embedding cosine similarity; return ordered unit_ids."""
     cfg = settings.active_llm
-    if not ensure_embedding_index(doc_id, settings, units=units):
+    model = embed_model_name(cfg)
+    if not model:
+        return []
+
+    content, current_units, corpus_hash = _get_current_corpus(doc_id)
+    if units is not None:
+        current_units = units
+        corpus_hash = _compute_corpus_hash(doc_id, content, current_units)
+    if not current_units:
+        return []
+
+    if not ensure_embedding_index(doc_id, settings, units=current_units):
         return []
 
     import numpy as np
@@ -465,8 +615,10 @@ def dense_search(doc_id: str, question: str, settings: Settings,
 
     with get_db() as conn:
         rows = conn.execute(
-            "SELECT unit_id, vector FROM document_embeddings WHERE doc_id=?",
-            (doc_id,),
+            """SELECT unit_id, vector
+               FROM document_embeddings
+               WHERE doc_id=? AND model=? AND corpus_hash=?""",
+            (doc_id, model, corpus_hash),
         ).fetchall()
     if not rows:
         return []

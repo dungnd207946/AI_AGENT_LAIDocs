@@ -9,7 +9,7 @@ import sqlite3
 import threading
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Generator
+from typing import Generator, Iterable
 
 from .config import LAIDOCS_HOME
 
@@ -63,11 +63,14 @@ _MIGRATIONS = [
     title TEXT,
     chunk TEXT NOT NULL,
     model TEXT NOT NULL,
+    corpus_hash TEXT NOT NULL DEFAULT '',
     dim INTEGER NOT NULL,
     vector BLOB NOT NULL,
     PRIMARY KEY (doc_id, unit_id)
 )""",
     "CREATE INDEX IF NOT EXISTS idx_doc_embeddings_doc ON document_embeddings(doc_id)",
+    "ALTER TABLE document_embeddings ADD COLUMN corpus_hash TEXT NOT NULL DEFAULT ''",
+    "CREATE INDEX IF NOT EXISTS idx_doc_embeddings_doc_model_hash ON document_embeddings(doc_id, model, corpus_hash)",
 ]
 
 
@@ -84,6 +87,30 @@ def init_db() -> None:
                 conn.execute(migration)
             except sqlite3.OperationalError:
                 pass  # column already exists
+        _migrate_document_embeddings_schema(conn)
+
+
+def _migrate_document_embeddings_schema(conn: sqlite3.Connection) -> None:
+    """Backfill document_embeddings schema additions for older databases."""
+    table = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='document_embeddings'"
+    ).fetchone()
+    if not table:
+        return
+
+    columns = {
+        row[1]: row
+        for row in conn.execute("PRAGMA table_info(document_embeddings)").fetchall()
+    }
+    if "corpus_hash" not in columns:
+        conn.execute(
+            "ALTER TABLE document_embeddings ADD COLUMN corpus_hash TEXT NOT NULL DEFAULT ''"
+        )
+
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_doc_embeddings_doc_model_hash "
+        "ON document_embeddings(doc_id, model, corpus_hash)"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -105,3 +132,32 @@ def get_db() -> Generator[sqlite3.Connection, None, None]:
         raise
     finally:
         conn.close()
+
+
+def invalidate_document_embeddings(doc_id: str) -> None:
+    """Delete all cached dense vectors for a document."""
+    with get_db() as conn:
+        conn.execute("DELETE FROM document_embeddings WHERE doc_id=?", (doc_id,))
+
+
+def invalidate_documents_embeddings(doc_ids: Iterable[str]) -> None:
+    """Delete cached dense vectors for multiple documents."""
+    ids = [doc_id for doc_id in doc_ids if doc_id]
+    if not ids:
+        return
+
+    placeholders = ",".join("?" for _ in ids)
+    with get_db() as conn:
+        conn.execute(
+            f"DELETE FROM document_embeddings WHERE doc_id IN ({placeholders})",
+            ids,
+        )
+
+
+def cleanup_orphan_embeddings() -> None:
+    """Remove embedding rows whose document no longer exists."""
+    with get_db() as conn:
+        conn.execute(
+            """DELETE FROM document_embeddings
+               WHERE doc_id NOT IN (SELECT id FROM documents)"""
+        )
