@@ -20,13 +20,15 @@ from deepagents import create_deep_agent
 from deepagents.backends import StateBackend, CompositeBackend
 from deepagents.backends.store import StoreBackend
 from langchain.chat_models import init_chat_model
+from langchain_core.messages import HumanMessage
 from langchain_core.tools import tool
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.store.memory import InMemoryStore
 
-from ..core.config import Settings, get_settings, LAIDOCS_HOME
+from ..core.config import LLMConfig, Settings, get_settings, LAIDOCS_HOME
 from ..core.database import get_db
+from ..core.vault import ensure_assets_dir
 from ..services.tree_index import find_nodes_by_ids, remove_fields
 
 logger = logging.getLogger(__name__)
@@ -56,8 +58,25 @@ context retrieved by your tools. If you cannot find the answer in the document, 
 2. **No fabrication**: NEVER invent, extrapolate, or assume information not present in the \
 retrieved context. "I don't see this in the document" is always a valid answer.
 3. **Cite sections**: When answering, reference the section title where you found the information.
-4. **Retrieval first**: ALWAYS call the retrieve_context tool before answering any question \
-about the document. Never answer from memory alone.
+4. **Retrieval first**: Your FIRST tool call for ANY question about the document \
+MUST be `retrieve_context`. Never answer from memory alone.
+5. **The document is NOT a file you can browse**: Your filesystem tools \
+(`ls`, `glob`, `grep`, `read_file`) only see your private scratch and `/memories/` \
+space — they will NEVER contain the user's document. NEVER use them to find, locate, \
+or read the document, and NEVER tell the user "no document exists" based on a file \
+listing. The ONLY way to access the document's content is the `retrieve_context` tool. \
+If you feel the urge to "look for the file", call `retrieve_context` instead.
+
+## Reading Images
+- The document may contain images, referenced in the context as \
+`![Image N](/assets/...)` (charts, diagrams, figures, scanned tables).
+- When the user's question concerns such an image, call the `read_image` tool \
+with the EXACT path from the context (e.g. `/assets/<doc_id>_1.png`) and a precise \
+prompt describing what to read.
+- Only read images that actually appear in the retrieved document context — \
+never invent or guess image paths.
+- Treat the vision model's answer as part of the document content (it is still \
+document-grounded); cite the image (e.g. "Image 1") in your answer.
 
 ## Response Style
 - Be concise and well-structured (use headers, bullets, bold for key terms)
@@ -214,6 +233,77 @@ def retrieve_context(question: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Custom Tool — VLM Image Reading
+# ---------------------------------------------------------------------------
+
+
+def _resolve_asset_path(image_path: str) -> Path | None:
+    """Map a Markdown image ref like ``/assets/<file>.png`` to its disk file.
+
+    Only the basename is used (defensive against path traversal); the file
+    must live inside the vault assets directory. Returns None if not found.
+    """
+    filename = Path(image_path.split("?", 1)[0]).name
+    if not filename:
+        return None
+    candidate = ensure_assets_dir() / filename
+    return candidate if candidate.exists() else None
+
+
+@tool
+def read_image(image_path: str, prompt: str) -> str:
+    """Read an image embedded in the document and answer a question about it.
+
+    Use this when retrieved context contains an image reference such as
+    ``![Image N](/assets/...)`` and the user's question concerns that image
+    (a chart, diagram, figure, scanned table, etc.). A vision model (VLM)
+    reads the actual image and answers your prompt.
+
+    Args:
+        image_path: The image reference exactly as it appears in the document
+            context, e.g. "/assets/<doc_id>_1.png".
+        prompt: A precise question or instruction describing what to read from
+            the image.
+    """
+    import base64
+
+    ctx = _tool_context_var.get()
+    settings: Settings | None = ctx.get("settings")
+    if not settings:
+        return "Error: Document context not configured."
+
+    vlm = settings.active_vlm
+    if not vlm.base_url or not vlm.model:
+        return "Error: VLM is not configured. Set it in Settings → VLM."
+
+    file_path = _resolve_asset_path(image_path)
+    if file_path is None:
+        return f"Error: Image {image_path} not found."
+
+    try:
+        data = file_path.read_bytes()
+        b64 = base64.b64encode(data).decode("ascii")
+        data_uri = f"data:image/png;base64,{b64}"
+        model = _create_model(vlm)
+        resp = model.invoke([
+            HumanMessage(content=[
+                {"type": "text", "text": prompt},
+                {"type": "image_url", "image_url": {"url": data_uri}},
+            ])
+        ])
+        content = resp.content
+        if isinstance(content, list):
+            # Some providers return content blocks; join text parts.
+            content = "".join(
+                part.get("text", "") if isinstance(part, dict) else str(part)
+                for part in content
+            )
+        return content or "The vision model returned an empty response."
+    except Exception as exc:  # noqa: BLE001 — surface to agent, don't crash stream
+        return f"Error reading image: {exc}"
+
+
+# ---------------------------------------------------------------------------
 # Memory initialization
 # ---------------------------------------------------------------------------
 
@@ -254,13 +344,18 @@ def _get_store() -> InMemoryStore:
     return _store
 
 
-def _create_model(settings: Settings):
-    """Create a LangChain chat model from LAIDocs settings."""
+def _create_model(cfg: LLMConfig):
+    """Create a LangChain chat model from an LLM/VLM config.
+
+    Shared by both the chat LLM (``settings.active_llm``) and the
+    vision model (``settings.active_vlm``) — they speak the same
+    OpenAI-compatible protocol, only base_url/api_key/model differ.
+    """
     return init_chat_model(
-        model=settings.active_llm.model,
+        model=cfg.model,
         model_provider="openai",
-        base_url=settings.active_llm.base_url or None,
-        api_key=settings.active_llm.api_key or "sk-placeholder",
+        base_url=cfg.base_url or None,
+        api_key=cfg.api_key or "sk-placeholder",
         max_retries=3,
         timeout=120,
     )
@@ -284,7 +379,7 @@ async def get_document_agent() -> CompiledStateGraph:
     checkpointer = await _get_checkpointer()
     store = _get_store()
 
-    model = _create_model(settings)
+    model = _create_model(settings.active_llm)
 
     # Backend: CompositeBackend routes /memories/ writes to LangGraph Store
     # for persistence, default StateBackend for ephemeral scratch files.
@@ -297,7 +392,7 @@ async def get_document_agent() -> CompiledStateGraph:
 
     _agent = create_deep_agent(
         model=model,
-        tools=[retrieve_context],
+        tools=[retrieve_context, read_image],
         system_prompt=DOCUMENT_SOUL_PROMPT,
         memory=["/memories/preferences.md"],
         backend=backend,
