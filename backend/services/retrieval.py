@@ -20,7 +20,9 @@ import json
 import logging
 import re
 
-from ..core.config import Settings, get_settings
+import httpx
+
+from ..core.config import RerankerConfig, Settings, get_settings
 from ..core.database import get_db
 from .llm import (
     create_chat_model,
@@ -44,7 +46,7 @@ _CHUNK_TARGET_CHARS = 1000  # chunk size when a document has no heading tree
 _NODE_SELECT_PROMPT = """\
 Given this document's tree structure, identify which sections are most \
 relevant to answer the user's question. Return ONLY a JSON array of \
-node_ids, ordered by relevance. Select 1-5 nodes maximum.
+node_ids, ordered by relevance. Select 1-{max_nodes} nodes maximum.
 
 Document Structure:
 {structure}
@@ -107,7 +109,13 @@ def _get_document_state(doc_id: str) -> tuple[str | None, dict | None]:
 # ---------------------------------------------------------------------------
 
 
-def select_node_ids(tree_index: dict, question: str, settings: Settings) -> list[str]:
+def select_node_ids(
+    tree_index: dict,
+    question: str,
+    settings: Settings,
+    *,
+    max_nodes: int = 5,
+) -> list[str]:
     """Ask the LLM which node_ids are relevant to the question.
 
     Synchronous on purpose: it is called from inside the LangChain ``@tool``
@@ -123,6 +131,7 @@ def select_node_ids(tree_index: dict, question: str, settings: Settings) -> list
     prompt = _NODE_SELECT_PROMPT.format(
         structure=json.dumps(structure_no_text, ensure_ascii=False, indent=2),
         question=question,
+        max_nodes=max(1, max_nodes),
     )
 
     model = create_chat_model(cfg, temperature=0, max_tokens=200)
@@ -636,6 +645,72 @@ def dense_search(doc_id: str, question: str, settings: Settings,
 
 
 # ---------------------------------------------------------------------------
+# Cross-encoder reranking
+# ---------------------------------------------------------------------------
+
+
+def is_reranker_configured(cfg: RerankerConfig) -> bool:
+    return bool(cfg.enabled and cfg.base_url and cfg.model)
+
+
+def _build_reranker_document(unit: dict) -> str:
+    heading_path = unit.get("heading_path") or []
+    if not isinstance(heading_path, list):
+        heading_path = [str(heading_path)]
+    heading_text = " > ".join(str(item).strip() for item in heading_path if str(item).strip())
+    path = str(unit.get("path") or "").strip()
+    parts = [
+        f"kind: {unit.get('kind') or 'text'}",
+        f"title: {unit.get('title') or ''}",
+        f"heading_path: {heading_text}",
+        f"path: {path}",
+        f"text:\n{unit.get('text') or ''}",
+    ]
+    return "\n".join(parts).strip()[:4000]
+
+
+def rerank_units(question: str, candidate_units: list[dict], settings: Settings) -> list[str]:
+    cfg = settings.active_reranker
+    if not is_reranker_configured(cfg) or not candidate_units:
+        return []
+
+    payload = {
+        "model": cfg.model,
+        "query": question,
+        "documents": [_build_reranker_document(unit) for unit in candidate_units],
+        "top_n": min(max(1, cfg.top_n), len(candidate_units)),
+    }
+    headers = {"Content-Type": "application/json"}
+    if cfg.api_key:
+        headers["Authorization"] = f"Bearer {cfg.api_key}"
+
+    timeout = httpx.Timeout(cfg.timeout_s)
+    with httpx.Client(timeout=timeout) as client:
+        response = client.post(cfg.base_url, json=payload, headers=headers)
+        response.raise_for_status()
+        data = response.json()
+
+    if not isinstance(data, dict) or not isinstance(data.get("results"), list):
+        raise ValueError("Invalid reranker response: missing results")
+
+    ranked: list[tuple[int, float]] = []
+    for item in data["results"]:
+        if not isinstance(item, dict):
+            continue
+        idx = item.get("index")
+        score = item.get("relevance_score", 0)
+        if not isinstance(idx, int) or idx < 0 or idx >= len(candidate_units):
+            continue
+        try:
+            ranked.append((idx, float(score)))
+        except (TypeError, ValueError):
+            continue
+
+    ranked.sort(key=lambda item: item[1], reverse=True)
+    return [str(candidate_units[idx]["unit_id"]) for idx, _ in ranked]
+
+
+# ---------------------------------------------------------------------------
 # Rank fusion
 # ---------------------------------------------------------------------------
 
@@ -674,27 +749,39 @@ def hybrid_rank(
     if not units:
         return [], None
 
+    reranker_cfg = settings.active_reranker
+    reranker_active = is_reranker_configured(reranker_cfg)
+    retriever_top_k = (
+        max(_FUSED_TOP_K, reranker_cfg.candidate_k)
+        if reranker_active
+        else _FUSED_TOP_K
+    )
     ranked_lists: list[list[str]] = []
 
     tree = tree if tree is not None else get_tree_index(doc_id)
     tree_selected: list[str] | None = None
     if tree and tree.get("structure"):
         try:
-            tree_selected = select_node_ids(tree, question, settings)
+            tree_selected = select_node_ids(
+                tree,
+                question,
+                settings,
+                max_nodes=retriever_top_k,
+            )
             if tree_selected:
                 ranked_lists.append(tree_selected)
         except Exception:
             logger.exception("Tree node selection failed for doc %s", doc_id)
 
     try:
-        bm = bm25_search(doc_id, question, units=units)
+        bm = bm25_search(doc_id, question, units=units, top_k=retriever_top_k)
         if bm:
             ranked_lists.append(bm)
     except Exception:
         logger.exception("BM25 retrieval failed for doc %s", doc_id)
 
     try:
-        dense = dense_search(doc_id, question, settings, units=units)
+        dense = dense_search(doc_id, question, settings, units=units, top_k=retriever_top_k)
         if dense:
             ranked_lists.append(dense)
     except Exception:
@@ -702,7 +789,24 @@ def hybrid_rank(
 
     if not ranked_lists:
         return [], tree_selected
-    return rrf_fuse(ranked_lists), tree_selected
+
+    fused = rrf_fuse(ranked_lists, top_k=retriever_top_k)
+    if not reranker_active or not fused:
+        return fused[:_FUSED_TOP_K], tree_selected
+
+    unit_map = {str(unit["unit_id"]): unit for unit in units if unit.get("unit_id") is not None}
+    candidate_units = [unit_map[uid] for uid in fused if uid in unit_map][:retriever_top_k]
+    if not candidate_units:
+        return fused[:_FUSED_TOP_K], tree_selected
+
+    try:
+        reranked = rerank_units(question, candidate_units, settings)
+        if reranked:
+            final_top_k = min(_FUSED_TOP_K, max(1, reranker_cfg.top_n))
+            return reranked[:final_top_k], tree_selected
+    except Exception:
+        logger.exception("Cross-encoder reranking failed for doc %s", doc_id)
+    return fused[:_FUSED_TOP_K], tree_selected
 
 
 # ---------------------------------------------------------------------------

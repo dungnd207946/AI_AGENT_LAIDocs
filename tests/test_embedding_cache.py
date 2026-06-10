@@ -20,6 +20,7 @@ from fastapi import BackgroundTasks  # noqa: E402
 
 from backend.api import documents as documents_api  # noqa: E402
 from backend.api import folders as folders_api  # noqa: E402
+from backend.api import settings as settings_api  # noqa: E402
 from backend.core import config as core_config  # noqa: E402
 from backend.core import database as core_database  # noqa: E402
 from backend.core import vault as core_vault  # noqa: E402
@@ -483,3 +484,179 @@ def test_update_document_only_invalidates_on_content_change():
         )
     )
     assert _row_count("document_embeddings") == 0
+
+
+def test_hybrid_rank_keeps_rrf_order_when_reranker_disabled(monkeypatch):
+    _reset_state()
+    settings = _settings()
+    settings.reranker.enabled = False
+
+    monkeypatch.setattr(retrieval, "get_retrieval_units", lambda _doc_id: [
+        {"unit_id": "a", "title": "A", "text": "Alpha", "kind": "text", "heading_path": [], "path": ""},
+        {"unit_id": "b", "title": "B", "text": "Beta", "kind": "text", "heading_path": [], "path": ""},
+    ])
+    monkeypatch.setattr(retrieval, "get_tree_index", lambda _doc_id: None)
+    monkeypatch.setattr(retrieval, "bm25_search", lambda *args, **kwargs: ["a", "b"])
+    monkeypatch.setattr(retrieval, "dense_search", lambda *args, **kwargs: ["b", "a"])
+    monkeypatch.setattr(retrieval, "rerank_units", lambda *args, **kwargs: ["b", "a"])
+
+    fused, tree_selected = retrieval.hybrid_rank("doc", "question", settings)
+    assert fused == ["a", "b"]
+    assert tree_selected is None
+
+
+def test_hybrid_rank_reranks_rrf_candidates(monkeypatch):
+    _reset_state()
+    settings = _settings()
+    settings.reranker.enabled = True
+    settings.reranker.candidate_k = 3
+    settings.reranker.top_n = 2
+
+    monkeypatch.setattr(retrieval, "get_retrieval_units", lambda _doc_id: [
+        {"unit_id": "a", "title": "A", "text": "Alpha", "kind": "text", "heading_path": [], "path": ""},
+        {"unit_id": "b", "title": "B", "text": "Beta", "kind": "text", "heading_path": [], "path": ""},
+        {"unit_id": "c", "title": "C", "text": "Gamma", "kind": "text", "heading_path": [], "path": ""},
+    ])
+    monkeypatch.setattr(retrieval, "get_tree_index", lambda _doc_id: None)
+    monkeypatch.setattr(retrieval, "bm25_search", lambda *args, **kwargs: ["a", "b", "c"])
+    monkeypatch.setattr(retrieval, "dense_search", lambda *args, **kwargs: ["b", "c", "a"])
+
+    captured = {}
+
+    def _rerank(question, candidate_units, _settings):
+        captured["question"] = question
+        captured["unit_ids"] = [unit["unit_id"] for unit in candidate_units]
+        return ["c", "b", "a"]
+
+    monkeypatch.setattr(retrieval, "rerank_units", _rerank)
+
+    fused, _tree_selected = retrieval.hybrid_rank("doc", "question", settings)
+    assert captured["question"] == "question"
+    assert captured["unit_ids"] == ["b", "a", "c"]
+    assert fused == ["c", "b"]
+
+
+def test_hybrid_rank_falls_back_to_rrf_on_reranker_error(monkeypatch):
+    _reset_state()
+    settings = _settings()
+    settings.reranker.enabled = True
+    settings.reranker.candidate_k = 3
+
+    monkeypatch.setattr(retrieval, "get_retrieval_units", lambda _doc_id: [
+        {"unit_id": "a", "title": "A", "text": "Alpha", "kind": "text", "heading_path": [], "path": ""},
+        {"unit_id": "b", "title": "B", "text": "Beta", "kind": "text", "heading_path": [], "path": ""},
+    ])
+    monkeypatch.setattr(retrieval, "get_tree_index", lambda _doc_id: None)
+    monkeypatch.setattr(retrieval, "bm25_search", lambda *args, **kwargs: ["a", "b"])
+    monkeypatch.setattr(retrieval, "dense_search", lambda *args, **kwargs: ["b", "a"])
+    monkeypatch.setattr(retrieval, "rerank_units", lambda *args, **kwargs: (_ for _ in ()).throw(ValueError("boom")))
+
+    fused, _tree_selected = retrieval.hybrid_rank("doc", "question", settings)
+    assert fused == ["a", "b"]
+
+
+def test_settings_api_masks_and_updates_reranker():
+    _reset_state()
+    settings = core_config.get_settings()
+    settings.reranker.api_key = "secret-reranker-key"
+    settings.save_to_file()
+    core_config.reload_settings()
+
+    masked = asyncio.run(settings_api.read_settings())
+    assert masked.reranker["api_key"] == "secr***"
+
+    updated = asyncio.run(
+        settings_api.update_settings(
+            settings_api._SettingsUpdate(
+                reranker={
+                    "enabled": True,
+                    "base_url": "https://example.test/rerank",
+                    "model": "rerank-test",
+                    "api_key": "abcd1234",
+                    "top_n": 5,
+                    "candidate_k": 12,
+                    "timeout_s": 9.5,
+                }
+            )
+        )
+    )
+    assert updated.reranker["api_key"] == "abcd***"
+
+    fresh = core_config.get_settings()
+    assert fresh.reranker.enabled is True
+    assert fresh.reranker.base_url == "https://example.test/rerank"
+    assert fresh.reranker.model == "rerank-test"
+    assert fresh.reranker.top_n == 5
+    assert fresh.reranker.candidate_k == 12
+    assert fresh.reranker.timeout_s == 9.5
+
+
+def test_test_reranker_endpoint_reports_success_and_error(monkeypatch):
+    _reset_state()
+
+    class _AsyncResponse:
+        def __init__(self, payload):
+            self._payload = payload
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return self._payload
+
+    class _AsyncClientOK:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, url, json, headers):
+            assert url == "https://example.test/rerank"
+            assert json["model"] == "rerank-test"
+            assert json["query"]
+            assert headers["Authorization"] == "Bearer secret"
+            return _AsyncResponse({"results": [{"index": 1, "relevance_score": 0.9}]})
+
+    monkeypatch.setattr(settings_api.httpx, "AsyncClient", _AsyncClientOK)
+    success = asyncio.run(
+        settings_api.test_reranker(
+            settings_api._TestRerankerRequest(
+                base_url="https://example.test/rerank",
+                api_key="secret",
+                model="rerank-test",
+                documents=["a", "b"],
+            )
+        )
+    )
+    assert success["success"] is True
+    assert success["results"][0]["index"] == 1
+
+    class _AsyncClientBad:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, url, json, headers):
+            return _AsyncResponse({"unexpected": []})
+
+    monkeypatch.setattr(settings_api.httpx, "AsyncClient", _AsyncClientBad)
+    failure = asyncio.run(
+        settings_api.test_reranker(
+            settings_api._TestRerankerRequest(
+                base_url="https://example.test/rerank",
+                api_key="secret",
+                model="rerank-test",
+                documents=["a", "b"],
+            )
+        )
+    )
+    assert failure["success"] is False

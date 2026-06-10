@@ -3,7 +3,13 @@ import { apiGet, apiPost, apiPut } from "../lib/sidecar";
 import DataTab, { type BackupStats, type PreviewResult } from "../components/DataTab";
 
 interface ServiceConfig { base_url: string; api_key: string; model: string; }
-interface SettingsData { llm: ServiceConfig; port: number; }
+interface RerankerConfig extends ServiceConfig {
+  enabled: boolean;
+  top_n: number;
+  candidate_k: number;
+  timeout_s: number;
+}
+interface SettingsData { llm: ServiceConfig; reranker: RerankerConfig; port: number; }
 interface TestResult { type: "success" | "error"; message: string; }
 
 // ── Field label ───────────────────────────────────────────────────
@@ -101,6 +107,12 @@ function TestResultBadge({ result }: { result: TestResult | null }) {
 const IconLLM = () => (
   <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
     <rect x="2" y="3" width="20" height="14" rx="2" /><line x1="8" y1="21" x2="16" y2="21" /><line x1="12" y1="17" x2="12" y2="21" />
+  </svg>
+);
+
+const IconReranker = () => (
+  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M3 7h10" /><path d="M3 12h18" /><path d="M3 17h14" /><circle cx="18" cy="7" r="2" /><circle cx="8" cy="17" r="2" />
   </svg>
 );
 
@@ -215,6 +227,7 @@ export default function Settings() {
   const [saveStatus, setSaveStatus] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [llmTest, setLlmTest] = useState<TestResult | null>(null);
+  const [rerankerTest, setRerankerTest] = useState<TestResult | null>(null);
   const [original, setOriginal] = useState<SettingsData | null>(null);
   const [activeTab, setActiveTab] = useState<Tab>("llm");
 
@@ -249,6 +262,33 @@ export default function Settings() {
     }
   }, [settings]);
 
+  const testReranker = useCallback(async () => {
+    if (!settings) return;
+    setRerankerTest(null);
+    try {
+      const res = await apiPost<{ success: boolean; results?: Array<{ index: number; score: number }>; error?: string }>(
+        "/api/settings/test-reranker",
+        {
+          base_url: settings.reranker.base_url || "https://api.jina.ai/v1/rerank",
+          api_key: settings.reranker.api_key,
+          model: settings.reranker.model,
+          documents: [
+            "Installation guide: run the setup command and verify dependencies.",
+            "Troubleshooting: if the service does not start, inspect the logs.",
+          ],
+          query: "How do I install the service?",
+        },
+      );
+      setRerankerTest(
+        res.success
+          ? { type: "success", message: `Reranker returned ${res.results?.length ?? 0} results.` }
+          : { type: "error", message: res.error ?? "Unknown error" },
+      );
+    } catch (err: unknown) {
+      setRerankerTest({ type: "error", message: (err as Error).message });
+    }
+  }, [settings]);
+
 
 
   const save = useCallback(async () => {
@@ -263,7 +303,26 @@ export default function Settings() {
         payload.llm = { base_url: llmBaseUrl, model: settings.llm.model, api_key: settings.llm.api_key };
       }
 
-
+      const rerankerBaseUrl = settings.reranker.base_url || "https://api.jina.ai/v1/rerank";
+      const rerankerChanged =
+        settings.reranker.enabled !== original.reranker.enabled ||
+        rerankerBaseUrl !== original.reranker.base_url ||
+        settings.reranker.model !== original.reranker.model ||
+        settings.reranker.api_key !== original.reranker.api_key ||
+        settings.reranker.top_n !== original.reranker.top_n ||
+        settings.reranker.candidate_k !== original.reranker.candidate_k ||
+        settings.reranker.timeout_s !== original.reranker.timeout_s;
+      if (rerankerChanged) {
+        payload.reranker = {
+          enabled: settings.reranker.enabled,
+          base_url: rerankerBaseUrl,
+          model: settings.reranker.model,
+          api_key: settings.reranker.api_key,
+          top_n: settings.reranker.top_n,
+          candidate_k: settings.reranker.candidate_k,
+          timeout_s: settings.reranker.timeout_s,
+        };
+      }
 
       const updated = await apiPut<SettingsData>("/api/settings", payload);
       setSettings(updated); setOriginal(updated);
@@ -280,8 +339,14 @@ export default function Settings() {
     if (llmBaseUrl !== original.llm.base_url) return true;
     if (settings.llm.model !== original.llm.model) return true;
     if (settings.llm.api_key !== original.llm.api_key) return true;
-
-
+    const rerankerBaseUrl = settings.reranker.base_url || "https://api.jina.ai/v1/rerank";
+    if (settings.reranker.enabled !== original.reranker.enabled) return true;
+    if (rerankerBaseUrl !== original.reranker.base_url) return true;
+    if (settings.reranker.model !== original.reranker.model) return true;
+    if (settings.reranker.api_key !== original.reranker.api_key) return true;
+    if (settings.reranker.top_n !== original.reranker.top_n) return true;
+    if (settings.reranker.candidate_k !== original.reranker.candidate_k) return true;
+    if (settings.reranker.timeout_s !== original.reranker.timeout_s) return true;
 
     return false;
   })();
@@ -383,24 +448,39 @@ export default function Settings() {
         <div style={{ maxWidth: 600 }} className="fade-in" key={activeTab}>
 
           {activeTab === "llm" && (
-            <ServiceSection
-              title="Language Model (OpenAI-compatible API)"
-              icon={<IconLLM />}
-              config={settings.llm}
-              onChange={(cfg) => setSettings({ ...settings, llm: cfg })}
-              testResult={llmTest}
-              onTest={testLlm}
-              testLabel="Test connection"
-            >
-              {/* <div style={{
-                marginBottom: 20, padding: "12px 16px", borderRadius: 8,
-                background: "var(--surface-alt)", border: "1px solid var(--border)",
-                fontSize: 13, color: "var(--text-secondary)", lineHeight: 1.5,
-                fontStyle: "italic"
-              }}>
-                The default LLM server is provided by the Language AI Part. To set up your own faster and more powerful model, please configure it here.
-              </div> */}
-            </ServiceSection>
+            <>
+              <ServiceSection
+                title="Language Model (OpenAI-compatible API)"
+                icon={<IconLLM />}
+                config={settings.llm}
+                onChange={(cfg) => setSettings({ ...settings, llm: cfg })}
+                testResult={llmTest}
+                onTest={testLlm}
+                testLabel="Test connection"
+              />
+              <ServiceSection
+                title="Reranker (Cross-encoder API)"
+                icon={<IconReranker />}
+                config={settings.reranker}
+                onChange={(cfg) => setSettings({ ...settings, reranker: { ...settings.reranker, ...cfg } })}
+                testResult={rerankerTest}
+                onTest={testReranker}
+                testLabel="Test reranker"
+              >
+                <div style={{ marginBottom: 18, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
+                  <div>
+                    <div style={{ fontSize: 13, color: "var(--text-primary)", marginBottom: 3 }}>Enable reranker</div>
+                    <div style={{ fontSize: 12, color: "var(--text-muted)" }}>Reorder RRF candidates before building chat context.</div>
+                  </div>
+                  <Toggle checked={settings.reranker.enabled} onChange={(v) => setSettings({ ...settings, reranker: { ...settings.reranker, enabled: v } })} />
+                </div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 16, marginBottom: 16 }}>
+                  <WarpNumberInput label="Top N" value={settings.reranker.top_n} onChange={(v) => setSettings({ ...settings, reranker: { ...settings.reranker, top_n: v } })} />
+                  <WarpNumberInput label="Candidate K" value={settings.reranker.candidate_k} onChange={(v) => setSettings({ ...settings, reranker: { ...settings.reranker, candidate_k: v } })} />
+                  <WarpNumberInput label="Timeout (seconds)" value={settings.reranker.timeout_s} onChange={(v) => setSettings({ ...settings, reranker: { ...settings.reranker, timeout_s: v } })} />
+                </div>
+              </ServiceSection>
+            </>
           )}
 
           {activeTab === "data" && <DataTab

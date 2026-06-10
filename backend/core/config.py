@@ -24,10 +24,21 @@ class LLMConfig(BaseModel):
     embed_model: str = ""
 
 
+class RerankerConfig(BaseModel):
+    enabled: bool = False
+    base_url: str = "https://api.jina.ai/v1/rerank"
+    api_key: str = ""
+    model: str = "jina-reranker-v2-base-multilingual"
+    top_n: int = 8
+    candidate_k: int = 20
+    timeout_s: float = 20.0
+
+
 class Settings(BaseSettings):
     """LAIDocs application settings persisted to ~/.laidocs/config.json and loaded from .env."""
 
     llm: LLMConfig = LLMConfig()
+    reranker: RerankerConfig = RerankerConfig()
     port: int = 8008
     telemetry_url: str = "http://localhost:8001/api/v1/track"
     telemetry_enabled: bool = True
@@ -47,6 +58,10 @@ class Settings(BaseSettings):
             model=self.llm.model or self.default_llm_model,
             embed_model=self.llm.embed_model or self.default_llm_embed_model,
         )
+
+    @property
+    def active_reranker(self) -> RerankerConfig:
+        return self.reranker.model_copy()
 
     model_config = SettingsConfigDict(
         arbitrary_types_allowed=True,
