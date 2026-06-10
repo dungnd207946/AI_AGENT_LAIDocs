@@ -434,8 +434,6 @@ async def update_document(doc_id: str, body: dict, background_tasks: BackgroundT
             )
 
     if content_changed:
-        invalidate_document_embeddings(doc_id)
-
         # Rebuild tree index in background
         async def _rebuild_tree(did: str, md: str):
             tree = await build_tree_index(md)
@@ -444,7 +442,6 @@ async def update_document(doc_id: str, body: dict, background_tasks: BackgroundT
                     "UPDATE documents SET tree_index=? WHERE id=?",
                     (json.dumps(tree, ensure_ascii=False) if tree else None, did),
                 )
-            invalidate_document_embeddings(did)
 
         background_tasks.add_task(_rebuild_tree, doc_id, markdown)
 

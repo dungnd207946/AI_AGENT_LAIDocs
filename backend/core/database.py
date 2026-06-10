@@ -64,13 +64,16 @@ _MIGRATIONS = [
     chunk TEXT NOT NULL,
     model TEXT NOT NULL,
     corpus_hash TEXT NOT NULL DEFAULT '',
+    unit_hash TEXT NOT NULL DEFAULT '',
     dim INTEGER NOT NULL,
     vector BLOB NOT NULL,
     PRIMARY KEY (doc_id, unit_id)
 )""",
     "CREATE INDEX IF NOT EXISTS idx_doc_embeddings_doc ON document_embeddings(doc_id)",
     "ALTER TABLE document_embeddings ADD COLUMN corpus_hash TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE document_embeddings ADD COLUMN unit_hash TEXT NOT NULL DEFAULT ''",
     "CREATE INDEX IF NOT EXISTS idx_doc_embeddings_doc_model_hash ON document_embeddings(doc_id, model, corpus_hash)",
+    "CREATE INDEX IF NOT EXISTS idx_doc_embeddings_doc_model_unit_hash ON document_embeddings(doc_id, model, unit_id, unit_hash)",
 ]
 
 
@@ -106,10 +109,18 @@ def _migrate_document_embeddings_schema(conn: sqlite3.Connection) -> None:
         conn.execute(
             "ALTER TABLE document_embeddings ADD COLUMN corpus_hash TEXT NOT NULL DEFAULT ''"
         )
+    if "unit_hash" not in columns:
+        conn.execute(
+            "ALTER TABLE document_embeddings ADD COLUMN unit_hash TEXT NOT NULL DEFAULT ''"
+        )
 
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_doc_embeddings_doc_model_hash "
         "ON document_embeddings(doc_id, model, corpus_hash)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_doc_embeddings_doc_model_unit_hash "
+        "ON document_embeddings(doc_id, model, unit_id, unit_hash)"
     )
 
 

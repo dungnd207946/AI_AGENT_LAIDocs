@@ -281,6 +281,30 @@ def _compute_corpus_hash(
     return hashlib.sha256(canonical_json.encode("utf-8")).hexdigest()
 
 
+def _compute_unit_hash(unit: dict) -> str:
+    """Hash one retrieval unit so unchanged chunks can reuse embeddings."""
+    payload = {
+        "version": 1,
+        "unit_id": _normalize_hash_value(unit.get("unit_id")),
+        "kind": _normalize_hash_value(unit.get("kind")),
+        "title": _normalize_hash_value(unit.get("title")),
+        "heading_path": _normalize_hash_value(unit.get("heading_path") or []),
+        "path": _normalize_hash_value(unit.get("path")),
+        "text": _normalize_hash_value(unit.get("text")),
+    }
+    canonical_json = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(canonical_json.encode("utf-8")).hexdigest()
+
+
+def _unit_embedding_text(unit: dict) -> str:
+    return f"{unit.get('title') or ''}\n{unit.get('text') or ''}".strip()[:8000]
+
+
 def _get_current_corpus(doc_id: str) -> tuple[str | None, list[dict], str]:
     """Load current document state, retrieval units, and canonical corpus hash."""
     content, tree = _get_document_state(doc_id)
@@ -509,11 +533,13 @@ def bm25_search(doc_id: str, question: str, units: list[dict] | None = None,
 
 def ensure_embedding_index(doc_id: str, settings: Settings,
                            units: list[dict] | None = None) -> bool:
-    """Build & persist the dense index for a doc if missing. Idempotent.
+    """Build & persist missing/stale dense vectors for a doc. Idempotent.
 
     Embeddings are computed lazily on first retrieval (no ingest-time hook),
-    so this is safe to call on every query. Returns False when embeddings are
-    unsupported/unconfigured or the document has no content.
+    so this is safe to call on every query. Cache validity is per retrieval
+    unit, not per whole document: editing one chunk only re-embeds that chunk.
+    Returns False when embeddings are unsupported/unconfigured or the document
+    has no content.
     """
     cfg = settings.active_llm
     if not embeddings_supported(cfg):
@@ -529,67 +555,97 @@ def ensure_embedding_index(doc_id: str, settings: Settings,
     if not units_v1:
         return False
 
-    current_unit_ids = {str(u.get("unit_id") or "") for u in units_v1}
+    current_units_by_id = {
+        str(u.get("unit_id") or ""): u
+        for u in units_v1
+        if str(u.get("unit_id") or "")
+    }
+    current_unit_hashes = {
+        unit_id: _compute_unit_hash(unit)
+        for unit_id, unit in current_units_by_id.items()
+    }
     with get_db() as conn:
         rows = conn.execute(
-            """SELECT unit_id, corpus_hash
+            """SELECT unit_id, unit_hash
                FROM document_embeddings
                WHERE doc_id=? AND model=?""",
             (doc_id, model),
         ).fetchall()
 
-    if rows:
-        matching_unit_ids = {
-            str(row["unit_id"])
-            for row in rows
-            if row["corpus_hash"] == corpus_hash_v1
-        }
-        stale_rows_present = any(
-            (row["corpus_hash"] or "") != corpus_hash_v1 for row in rows
-        )
-        if (
-            not stale_rows_present
-            and matching_unit_ids == current_unit_ids
-            and len(matching_unit_ids) == len(units_v1)
-        ):
-            return True
+    cached_hashes = {str(row["unit_id"]): row["unit_hash"] or "" for row in rows}
+    missing_unit_ids = [
+        unit_id
+        for unit_id, unit_hash in current_unit_hashes.items()
+        if cached_hashes.get(unit_id) != unit_hash
+    ]
+
+    stale_unit_ids = [
+        unit_id
+        for unit_id in cached_hashes
+        if unit_id not in current_unit_hashes
+        or cached_hashes.get(unit_id) != current_unit_hashes.get(unit_id)
+    ]
+
+    if not missing_unit_ids:
+        if stale_unit_ids:
+            with get_db() as conn:
+                conn.executemany(
+                    "DELETE FROM document_embeddings WHERE doc_id=? AND model=? AND unit_id=?",
+                    [(doc_id, model, unit_id) for unit_id in stale_unit_ids],
+                )
+        return True
 
     import numpy as np
 
     embedder = create_embeddings(cfg)
-    texts = [f"{u['title']}\n{u['text']}".strip()[:8000] for u in units_v1]
+    units_to_embed = [current_units_by_id[unit_id] for unit_id in missing_unit_ids]
+    texts = [_unit_embedding_text(unit) for unit in units_to_embed]
     vectors = embedder.embed_documents(texts)
 
-    content_v2, units_v2, corpus_hash_v2 = _get_current_corpus(doc_id)
-    if corpus_hash_v2 != corpus_hash_v1:
+    _content_v2, units_v2, corpus_hash_v2 = _get_current_corpus(doc_id)
+    units_by_id_v2 = {
+        str(u.get("unit_id") or ""): u
+        for u in units_v2
+        if str(u.get("unit_id") or "")
+    }
+    unit_hashes_v2 = {
+        unit_id: _compute_unit_hash(unit)
+        for unit_id, unit in units_by_id_v2.items()
+    }
+    if any(unit_hashes_v2.get(unit_id) != current_unit_hashes.get(unit_id) for unit_id in missing_unit_ids):
         logger.info("Skipping stale embedding write for doc %s after corpus change", doc_id)
         return False
-    if len(vectors) != len(units_v2):
+    if len(vectors) != len(units_to_embed):
         logger.warning(
             "Embedding vector count mismatch for doc %s: %s vectors for %s units",
             doc_id,
             len(vectors),
-            len(units_v2),
+            len(units_to_embed),
         )
         return False
 
     with get_db() as conn:
         conn.execute("BEGIN")
-        # Clear any stale rows for this document before inserting the current corpus.
-        conn.execute("DELETE FROM document_embeddings WHERE doc_id=?", (doc_id,))
-        for u, vec in zip(units_v2, vectors):
+        if stale_unit_ids:
+            conn.executemany(
+                "DELETE FROM document_embeddings WHERE doc_id=? AND model=? AND unit_id=?",
+                [(doc_id, model, unit_id) for unit_id in stale_unit_ids],
+            )
+        for u, vec in zip(units_to_embed, vectors):
+            unit_id = str(u.get("unit_id") or "")
             arr = np.asarray(vec, dtype=np.float32)
             conn.execute(
                 """INSERT OR REPLACE INTO document_embeddings
-                   (doc_id, unit_id, title, chunk, model, corpus_hash, dim, vector)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                   (doc_id, unit_id, title, chunk, model, corpus_hash, unit_hash, dim, vector)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     doc_id,
-                    u["unit_id"],
-                    u["title"],
-                    u["text"],
+                    unit_id,
+                    u.get("title") or "",
+                    u.get("text") or "",
                     model,
                     corpus_hash_v2,
+                    unit_hashes_v2[unit_id],
                     int(arr.shape[0]),
                     arr.tobytes(),
                 ),
@@ -606,10 +662,9 @@ def dense_search(doc_id: str, question: str, settings: Settings,
     if not model:
         return []
 
-    content, current_units, corpus_hash = _get_current_corpus(doc_id)
+    content, current_units, _corpus_hash = _get_current_corpus(doc_id)
     if units is not None:
         current_units = units
-        corpus_hash = _compute_corpus_hash(doc_id, content, current_units)
     if not current_units:
         return []
 
@@ -621,19 +676,26 @@ def dense_search(doc_id: str, question: str, settings: Settings,
     embedder = create_embeddings(cfg)
     q = np.asarray(embedder.embed_query(question), dtype=np.float32)
     qn = q / (np.linalg.norm(q) + 1e-8)
+    current_unit_hashes = {
+        str(unit.get("unit_id") or ""): _compute_unit_hash(unit)
+        for unit in current_units
+        if str(unit.get("unit_id") or "")
+    }
 
     with get_db() as conn:
         rows = conn.execute(
-            """SELECT unit_id, vector
+            """SELECT unit_id, unit_hash, vector
                FROM document_embeddings
-               WHERE doc_id=? AND model=? AND corpus_hash=?""",
-            (doc_id, model, corpus_hash),
+               WHERE doc_id=? AND model=?""",
+            (doc_id, model),
         ).fetchall()
     if not rows:
         return []
 
     scored: list[tuple[str, float]] = []
-    for unit_id, blob in rows:
+    for unit_id, unit_hash, blob in rows:
+        if current_unit_hashes.get(str(unit_id)) != (unit_hash or ""):
+            continue
         v = np.frombuffer(blob, dtype=np.float32)
         if v.shape != qn.shape:
             continue  # dimension mismatch (stale model) — skip

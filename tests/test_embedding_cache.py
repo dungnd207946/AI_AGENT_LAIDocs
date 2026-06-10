@@ -125,15 +125,16 @@ def _insert_embedding(
     *,
     model: str = "embed-test",
     corpus_hash: str = "",
+    unit_hash: str = "",
     vector: bytes | None = None,
 ) -> None:
     vector = vector or sqlite3.Binary(b"\x00\x00\x80?\x00\x00\x00\x00")
     with get_db() as conn:
         conn.execute(
             """INSERT OR REPLACE INTO document_embeddings
-               (doc_id, unit_id, title, chunk, model, corpus_hash, dim, vector)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-            (doc_id, unit_id, unit_id, unit_id, model, corpus_hash, 2, vector),
+               (doc_id, unit_id, title, chunk, model, corpus_hash, unit_hash, dim, vector)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (doc_id, unit_id, unit_id, unit_id, model, corpus_hash, unit_hash, 2, vector),
         )
 
 
@@ -290,30 +291,76 @@ def test_ensure_embedding_index_rebuilds_blank_hash_and_replaces_fallback_units(
 
     with get_db() as conn:
         rows = conn.execute(
-            "SELECT unit_id, model, corpus_hash FROM document_embeddings WHERE doc_id=?",
+            "SELECT unit_id, model, unit_hash FROM document_embeddings WHERE doc_id=?",
             (doc_id,),
         ).fetchall()
     assert len(rows) == 1
     assert rows[0]["unit_id"] == "0001"
     assert rows[0]["model"] == "embed-test"
-    assert rows[0]["corpus_hash"]
+    assert rows[0]["unit_hash"]
 
 
-def test_dense_search_reads_only_current_corpus_hash(monkeypatch):
+def test_dense_search_reads_only_current_unit_hash(monkeypatch):
     _reset_state()
     doc_id = "doc-dense"
     content = "# Intro\n\nAlpha"
     tree = {"structure": [{"node_id": "0001", "title": "Intro", "text": content, "nodes": []}]}
     _insert_document(doc_id, content=content, tree=tree)
-    _, _, current_hash = retrieval._get_current_corpus(doc_id)
-    _insert_embedding(doc_id, "0001", corpus_hash=current_hash)
-    _insert_embedding(doc_id, "9999", corpus_hash="old-hash")
+    _content, units, _corpus_hash = retrieval._get_current_corpus(doc_id)
+    current_hash = retrieval._compute_unit_hash(units[0])
+    _insert_embedding(doc_id, "0001", unit_hash=current_hash)
+    _insert_embedding(doc_id, "9999", unit_hash="old-hash")
 
     _patch_embeddings(monkeypatch)
     monkeypatch.setattr(retrieval, "ensure_embedding_index", lambda *args, **kwargs: True)
 
     ranked = retrieval.dense_search(doc_id, "alpha", _settings())
     assert ranked == ["0001"]
+
+
+def test_ensure_embedding_index_reembeds_only_changed_unit(monkeypatch):
+    _reset_state()
+    doc_id = "doc-partial"
+    tree = {
+        "structure": [
+            {"node_id": "0001", "title": "One", "text": "Stable body", "nodes": []},
+            {"node_id": "0002", "title": "Two", "text": "Old body", "nodes": []},
+        ]
+    }
+    _insert_document(doc_id, content="# One\n\nStable body\n\n# Two\n\nOld body", tree=tree)
+
+    embedded_batches: list[list[str]] = []
+    _patch_embeddings(monkeypatch, on_embed=lambda texts: embedded_batches.append(texts))
+
+    assert retrieval.ensure_embedding_index(doc_id, _settings()) is True
+    assert len(embedded_batches[-1]) == 2
+
+    changed_tree = {
+        "structure": [
+            {"node_id": "0001", "title": "One", "text": "Stable body", "nodes": []},
+            {"node_id": "0002", "title": "Two", "text": "New body", "nodes": []},
+        ]
+    }
+    with get_db() as conn:
+        conn.execute(
+            "UPDATE documents SET content=?, tree_index=? WHERE id=?",
+            (
+                "# One\n\nStable body\n\n# Two\n\nNew body",
+                json.dumps(changed_tree, ensure_ascii=False),
+                doc_id,
+            ),
+        )
+
+    assert retrieval.ensure_embedding_index(doc_id, _settings()) is True
+    assert embedded_batches[-1] == ["Two\nNew body"]
+
+    with get_db() as conn:
+        rows = conn.execute(
+            "SELECT unit_id, unit_hash FROM document_embeddings WHERE doc_id=? ORDER BY unit_id",
+            (doc_id,),
+        ).fetchall()
+    assert [row["unit_id"] for row in rows] == ["0001", "0002"]
+    assert all(row["unit_hash"] for row in rows)
 
 
 def test_race_rebuild_drops_old_vectors_when_corpus_changes_during_embedding(monkeypatch):
@@ -461,7 +508,7 @@ def test_backup_merge_invalidates_only_new_docs(tmp_path):
     assert new_doc is not None
 
 
-def test_update_document_only_invalidates_on_content_change():
+def test_update_document_does_not_delete_embeddings_on_content_change():
     _reset_state()
     doc_id = "doc-update"
     _insert_document(doc_id, content="Same body", filename="same.md", title="Old title")
@@ -483,7 +530,7 @@ def test_update_document_only_invalidates_on_content_change():
             BackgroundTasks(),
         )
     )
-    assert _row_count("document_embeddings") == 0
+    assert _row_count("document_embeddings") == 1
 
 
 def test_hybrid_rank_keeps_rrf_order_when_reranker_disabled(monkeypatch):
