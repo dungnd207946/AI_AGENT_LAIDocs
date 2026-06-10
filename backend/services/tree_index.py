@@ -160,24 +160,27 @@ Return only the description, nothing else."""
 
 async def _generate_summary(text: str, settings: Settings) -> str:
     """Generate a summary for a single node using the configured LLM."""
-    from openai import OpenAI
+    from .llm import create_chat_model, is_llm_configured
 
-    cfg = settings.llm
-    if not cfg.model or not cfg.base_url:
+    # Use active_llm so env-based default credentials are honoured (previously
+    # this read settings.llm directly and silently fell back to truncation when
+    # only the DEFAULT_LLM_* env vars were set).
+    cfg = settings.active_llm
+    if not is_llm_configured(cfg):
         # LLM not configured — use truncated text as summary
         return text[:200] + ("..." if len(text) > 200 else "")
 
-    client = OpenAI(base_url=cfg.base_url or None, api_key=cfg.api_key or "sk-placeholder")
+    def _call() -> str:
+        model = create_chat_model(cfg, temperature=0, max_tokens=150)
+        resp = model.invoke(
+            [{"role": "user", "content": _SUMMARY_PROMPT.format(text=text[:3000])}]
+        )
+        content = resp.content if isinstance(resp.content, str) else str(resp.content)
+        return content or text[:200]
 
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     try:
-        resp = await loop.run_in_executor(None, lambda: client.chat.completions.create(
-            model=cfg.model,
-            messages=[{"role": "user", "content": _SUMMARY_PROMPT.format(text=text[:3000])}],
-            max_tokens=150,
-            temperature=0,
-        ))
-        return resp.choices[0].message.content or text[:200]
+        return await loop.run_in_executor(None, _call)
     except Exception:
         return text[:200] + ("..." if len(text) > 200 else "")
 

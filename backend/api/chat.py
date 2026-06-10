@@ -69,7 +69,8 @@ async def chat_stream(body: ChatRequest):
     The agent uses Tree Reasoning retrieval to ground answers in the document.
     """
     settings = get_settings()
-    if not settings.active_llm.model or not settings.active_llm.base_url:
+    from ..services.llm import is_llm_configured
+    if not is_llm_configured(settings.active_llm):
         raise HTTPException(
             status_code=503,
             detail="LLM is not configured. Please set the LLM endpoint in Settings.",
@@ -100,65 +101,45 @@ async def chat_stream(body: ChatRequest):
                 "tags": ["ai-agent-chatbot"],
             }
 
-            # Provide preferences file content if it exists
-            from datetime import datetime
-            from ..services.agent import PREFERENCES_FILE
-            files = {}
-            if PREFERENCES_FILE.exists():
-                files["/memories/preferences.md"] = {
-                    "content": PREFERENCES_FILE.read_text(encoding="utf-8"),
-                    "encoding": "utf-8",
-                    # DeepAgents' _glob_search_files reads file_data["modified_at"]
-                    # unconditionally; omitting it crashes the agent's filesystem tools.
-                    "modified_at": datetime.fromtimestamp(
-                        PREFERENCES_FILE.stat().st_mtime
-                    ).isoformat(),
-                }
-
             stream_input = {
                 "messages": [{"role": "user", "content": body.question}],
             }
-            if files:
-                stream_input["files"] = files
 
-            # Use v2 streaming format (dict-based) per LangGraph docs
-            async for chunk in agent.astream(
+            # astream_events v2 yields dicts — filter to AI text tokens only,
+            # skipping tool-call chunks and tool-node output.
+            async for chunk in agent.astream_events(
                 stream_input,
-                stream_mode="messages",
-                subgraphs=True,
                 version="v2",
                 config=config,
             ):
-                if not isinstance(chunk, dict):
+                if chunk.get("event") != "on_chat_model_stream":
                     continue
 
-                # Only process message-type chunks
-                if chunk.get("type") != "messages":
+                # Skip tokens produced inside the tools node
+                node = chunk.get("metadata", {}).get("langgraph_node", "")
+                if node == "tools":
                     continue
 
-                data = chunk.get("data")
-                if not isinstance(data, (list, tuple)) or len(data) != 2:
+                message_obj = chunk.get("data", {}).get("chunk")
+                if not message_obj:
                     continue
 
-                message_obj, metadata = data
-
-                # Only emit AI content tokens from the main agent
-                # Skip tool calls, subagent output, and summarization
-                is_subagent = any(
-                    s.startswith("tools:") for s in chunk.get("ns", ())
-                )
-                if is_subagent:
+                content = getattr(message_obj, "content", "")
+                if not content or getattr(message_obj, "tool_call_chunks", None):
                     continue
 
-                if (
-                    hasattr(message_obj, 'type') and message_obj.type in ("ai", "AIMessageChunk")
-                    and hasattr(message_obj, 'content') and message_obj.content
-                    and not getattr(message_obj, 'tool_call_chunks', None)
-                ):
-                    token = message_obj.content
-                    full_response += token
-                    escaped = token.replace("\n", "\\n")
-                    yield f"data: {escaped}\n\n"
+                # Gemini (google-genai SDK) may return content as a list of
+                # content blocks: [{'type': 'text', 'text': '...', ...}]
+                if isinstance(content, list):
+                    token = "".join(
+                        block.get("text", "") if isinstance(block, dict) else str(block)
+                        for block in content
+                    )
+                else:
+                    token = content
+                full_response += token
+                escaped = token.replace("\n", "\\n")
+                yield f"data: {escaped}\n\n"
 
         except Exception as exc:
             logger.exception("Chat stream error")
