@@ -25,7 +25,7 @@ reproduce** the system — not just install it.
 ## 1. System overview
 
 LAIDocs converts documents to Markdown, indexes them, and answers questions
-**grounded only in the document** via a DeepAgents agent. The AI layer is the
+**grounded only in the document** via a LangGraph ReAct agent. The AI layer is the
 part that does retrieval, reasoning, and answer generation.
 
 ### 1.1 Component map (AI layer)
@@ -39,13 +39,21 @@ backend/services/
 ├── retrieval.py              THE retrieval engine:
 │                               • retrieval units (tree nodes / chunks / figures / tables)
 │                               • BM25 (lexical)  • dense (embeddings)  • tree reasoning
-│                               • RRF fusion → hybrid_rank
+│                               • graph_search (GraphRAG) — fused as a 4th signal
+│                               • RRF fusion → hybrid_rank  • optional cross-encoder rerank
+│                               • per-unit-hash embedding cache (only re-embed changed units)
 │                               • single-shot retrieve_context
 │                               • agentic_retrieve_context (multi-hop + self-critique)
-├── knowledge_graph.py        Entity-relation graph + multi-hop graph retrieval + graph-of-thought
+├── compactor.py              Rolling-summary conversation compactor (token budget control)
+├── knowledge_graph.py        Entity-relation graph + multi-hop graph retrieval + graph-of-thought.
+│                               LIVE: fused into hybrid_rank + exposed as the reason_over_graph
+│                               tool. Triples cached in document_graph_units (per unit_hash),
+│                               built at ingest / lazily; ~1 LLM call per query at run time.
 ├── evaluation.py             Retrieval metrics + RAGAS-style grounding/relevance (injectable judge)
-└── agent.py                  DeepAgents agent: SOUL prompt, retrieve_context tool,
-                                MemorySaver checkpointer, durable SqliteStore memory
+└── agent.py                  LangGraph create_react_agent: SOUL prompt; tools =
+                                retrieve_context / reason_over_graph / read_image / preview_edit /
+                                apply_edit / create_markdown_file; durable AsyncSqliteSaver
+                                checkpointer (per session); per-message retrieved-evidence tracking
 ```
 
 ### 1.2 What runs locally vs. what calls an external API
@@ -83,13 +91,14 @@ embedding/inference (embeddings are obtained via the provider API). Where the
 evaluation guide mentions these, it says so explicitly and frames them as
 extension points, not features.
 
-> **Live-path wiring.** `evaluation.py` and `knowledge_graph.py` are standalone
-> AI libraries with clean entry points. The agent's live `retrieve_context`
-> tool currently calls `retrieval.agentic_retrieve_context` only — the eval
-> harness and the KG/graph-of-thought are invoked from scripts/tests, not yet
-> from the agent answer path. Their hooks (`graph_augmented_units` returns
-> RRF-ready ids; `graph_of_thought` returns a scaffold string) are shaped to
-> drop in. This is intentional and documented per the project's scope.
+> **Live-path wiring.** `knowledge_graph.py` is now **wired into the live agent
+> path**: `retrieval.hybrid_rank` fuses `graph_search` (cache-backed
+> `graph_augmented_units_cached`) as a fourth signal, and the agent exposes
+> `reason_over_graph` (graph-of-thought) as a tool. Triples are persisted in the
+> `document_graph_units` cache (per `unit_hash`), built at ingest / lazily, so
+> the query-time cost is ~one LLM call. `evaluation.py` remains a standalone
+> harness invoked from scripts/tests (not the answer path) — an intentional,
+> documented boundary.
 
 ---
 
@@ -162,64 +171,88 @@ Bounds: `MAX_RETRIEVAL_ROUNDS=3`, `MAX_FOLLOWUPS_PER_ROUND=2`,
 scored by the best RRF rank seen — so a fact split across sections is gathered
 hop by hop.
 
-### 2.4 Knowledge-graph retrieval (parallel track)
+### 2.4 Knowledge-graph retrieval (GraphRAG — fused into the live path)
 
-`knowledge_graph.graph_augmented_units(doc_id, question)` builds an
-entity-relation graph from the same units, finds the question's entities, walks
-≤2 hops, and returns the source `unit_id`s of every reached entity — **shaped to
-fuse as one more ranked list into `rrf_fuse`**. `graph_of_thought(...)` instead
-renders the relation paths between question entities as explicit
-`A --[founded by]--> B --[located in]--> C` reasoning chains.
+`knowledge_graph` builds an entity-relation graph from the same units, finds the
+question's entities, walks ≤`hops` edges, and returns the source `unit_id`s of
+every reached entity — fused as a fourth ranked list into `rrf_fuse` via
+`retrieval.graph_search`. `graph_of_thought(...)` instead renders the relation
+paths between question entities as explicit
+`A --[founded by]--> B --[located in]--> C` reasoning chains, exposed to the
+agent as the `reason_over_graph` tool.
+
+**Caching (what makes it live-viable).** Rebuilding the graph per query means one
+LLM triple-extraction call *per unit, per question* — too slow for the answer
+path. So triples are extracted **once per retrieval unit** and persisted in
+`document_graph_units`, keyed by `unit_hash` + extractor `model` (the same
+incremental pattern as the embedding cache). `ensure_graph_index` re-extracts
+only changed units; `graph_augmented_units_cached` / `graph_of_thought_cached`
+then load the graph deterministically and spend just ~one LLM call (query-entity
+extraction) at run time. The cache is built proactively in the ingest background
+task (after the tree index) and lazily on first query otherwise. Gated by
+`Settings.active_graph_rag.enabled` (default on); a no-op without an LLM.
 
 ---
 
 ## 3. Memory pipeline
 
-Two independent memory systems, by design:
+Two memory layers, by design:
 
 ```
-┌─ Conversation memory (working) ──────────────────────────────┐
-│ LangGraph MemorySaver checkpointer (in-process, per session) │
-│ Holds the active turn-by-turn state for one chat session.    │
-└──────────────────────────────────────────────────────────────┘
-┌─ Long-term memory (durable) ─────────────────────────────────┐
-│ SqliteStore at ~/.laidocs/data/memory_store.db               │
-│ CompositeBackend routes /memories/ writes here; survives      │
-│ restarts. Seeded from ~/.laidocs/memories/preferences.md.     │
-│ The agent learns repeated user preferences (language, detail).│
-└──────────────────────────────────────────────────────────────┘
+Conversation memory — DURABLE
+  LangGraph AsyncSqliteSaver checkpointer at ~/.laidocs/data/checkpoints.db.
+  One thread per "doc-{doc_id}-s{session_id}"; holds turn-by-turn state and
+  SURVIVES backend restarts — any past session can be resumed.
+
+User preferences — READ-ONLY SEED
+  ~/.laidocs/memories/preferences.md is read at agent build time and injected
+  into the SOUL system prompt. There is NO runtime write-back store: the agent
+  does not learn or persist new preferences (the former SqliteStore /memories/
+  backend was removed in the move off DeepAgents).
 ```
 
 Display history (what the UI shows) is a separate `chat_messages` SQLite table
-that survives a session reset — it is **not** the checkpointer. See
-[EVALUATION.md §With/Without Memory](EVALUATION.md#7-long-term-memory-evaluation)
-for how to measure memory's effect.
+that survives a session reset — it is **not** the checkpointer. To keep prompt
+size bounded, `compactor.py` rolls older display history into an LLM summary row
+once it crosses a token threshold (last few Q&A pairs kept verbatim); the next
+request loads `[summary] + [tail]` instead of the full transcript.
 
 ---
 
 ## 4. Agent orchestration
 
-`agent.py` builds a single DeepAgents agent (lazy singleton):
+`agent.py` builds a single LangGraph `create_react_agent` (lazy singleton):
 
 - **SOUL system prompt** — document-grounded only, no fabrication, cite
-  sections/figures/tables, retrieve before answering.
-- **One tool** — `retrieve_context(question)` → `agentic_retrieve_context`.
-- **Checkpointer** — `MemorySaver` for working memory.
-- **Store** — `SqliteStore` for durable `/memories/`.
-- **Concurrency** — per-request `doc_id`/`settings` live in a `ContextVar`
-  (`set_tool_context`), so concurrent requests never collide.
+  sections/figures/tables, retrieve before answering. Preferences from
+  `preferences.md` are appended at build time.
+- **Tools** — `retrieve_context(question)` → `agentic_retrieve_context`;
+  `read_image(image_path, prompt)` (VLM); `preview_edit` / `apply_edit`;
+  `create_markdown_file([filename], [content])` (export a `.md` for download).
+- **Checkpointer** — durable `AsyncSqliteSaver` (`checkpoints.db`) for
+  per-session conversation memory; closed on shutdown via `close_checkpointer()`.
+- **Compaction** — `compactor.compact_if_needed` runs before each stream; once
+  display history exceeds the token threshold it rolls the older turns into an
+  LLM summary, keeping the last few Q&A pairs verbatim, so the prompt stays bounded.
+- **Evidence tracking** — the units retrieved on a turn are saved per message
+  (`save_message_evidence`) and read back via `get_retrieved_evidence`; stale or
+  unverified prior evidence is flagged so it is never reused as a document fact.
+- **Concurrency** — per-request `doc_id`/`settings`/`edited` live in a
+  `ContextVar` (`set_tool_context`), so concurrent requests never collide.
 - **Reset** — `reset_agent()` after a settings change rebuilds the singleton
-  with the new model on the next request.
+  with the new model on the next request (the checkpointer is reused).
 
 Request flow:
 
 ```
-chat request ─► set_tool_context(doc_id, settings) ─► agent.astream(...)
-   agent reads /memories/preferences.md
+chat request ─► compact_if_needed(doc_id) ─► set_tool_context(doc_id, settings)
+   ─► agent.astream_events(question, version="v2", thread_id=doc-…-s…)
    agent calls retrieve_context(question)
-        └─► agentic_retrieve_context → hybrid_rank loop → context
+        └─► agentic_retrieve_context → hybrid_rank (+ optional rerank) → context
+            (cached embeddings reused for unchanged units)
+   retrieved units saved as this message's evidence
    agent composes a grounded, cited answer ─► SSE tokens to the client
-   agent may persist a learned preference to /memories/
+   (if it called apply_edit, the stream also emits [EDITED])
 ```
 
 ---
@@ -300,220 +333,314 @@ Use that id wherever a snippet says `YOUR_DOC_ID`.
 
 ## 6. Demo scenarios
 
-Repeatable, end-to-end walkthroughs of the AI layer. Each lists **what it
-shows**, **which subsystem**, **mode**, the **exact commands**, the **expected
-result**, and the **talk track**. (For the one-paragraph "presenter cue"
-versions and the deeper measurement protocol behind each, see
-[EVALUATION.md §13](EVALUATION.md#13-demo-scenarios).)
+Repeatable, end-to-end walkthroughs that build **one story**: *this assistant is
+grounded, reasons across a document, and you can prove it.* Run them roughly in
+order — each scenario adds a claim, and the last two back the claims with numbers.
 
-| # | Scenario | Subsystem | Mode | Needs |
-|---|----------|-----------|------|-------|
-| 1 | Retrieval leaderboard | BM25 / dense / tree / hybrid / graph + RRF | **offline** | nothing |
-| 2 | Anti-hallucination harness | grounding / faithfulness eval | **offline → live** | LLM for the live arm |
-| 3 | Citation-grounded QA & out-of-scope refusal | agent SOUL + `retrieve_context` | **live** | app + doc + LLM |
-| 4 | Agentic multi-hop retrieval | self-critique loop | **live** | doc + LLM |
-| 5 | Multimodal table / figure QA | `img*` / `tbl*` units | **live** | doc w/ table+figure + LLM |
-| 6 | Knowledge graph + graph-of-thought | entity graph reasoning | **live** | doc + LLM |
-| 7 | Durable memory / personalization | `SqliteStore` `/memories/` | **live** | app + LLM |
+Every scenario lists **what it proves**, the **subsystem/files**, the **mode**
+(offline / live / in-app), **setup**, **exact steps**, the **expected result**
+on the shared demo document, **what to point at**, and a one-line **wow**.
 
-**Start with the offline scenarios** (1, and 2's dry-run) — they reproduce from a
-clean checkout with no key. The live scenarios assume §5.1/§5.2 are set up with a
-provider configured and a document ingested.
+### 6.0 The demo document (use this everywhere)
 
-### Scenario 1 — Retrieval leaderboard (offline, fully reproducible)
+All live scenarios use one small, deterministic file:
+[`docs/ai/demo/acme_robotics_handbook.md`](demo/acme_robotics_handbook.md). Its
+facts are **chained across sections on purpose** — the founder is *named* in §1
+but *described* (PhD city, birthplace) in §3; the product is named in §4 but the
+factory city lives in §2. That is exactly the shape where plain RAG fails and
+GraphRAG wins, so the contrast is reproducible, not lucky.
 
-- **Shows:** the five retriever variants ranked head-to-head on a gold dataset —
-  the evidence that hybrid RRF is a robust default and `graph` wins precision on
-  the multi-hop entity question.
-- **Subsystem:** [`retrieval.py`](../../backend/services/retrieval.py) (BM25 +
-  dense + tree + RRF) and [`knowledge_graph.py`](../../backend/services/knowledge_graph.py).
-- **Mode:** offline — scores the `ranked_units` already recorded in the dataset;
-  no LLM, no DB.
+```text
+§1 Company     Acme Robotics — founded by Dr. Lena Hoffmann (2014)
+§2 Headquarters    …headquartered in Berlin; all manufacturing in Berlin
+§3 Leadership      Dr. Lena Hoffmann — PhD in Munich, born in Lyon
+§4 Products        …manufactures the Atlas-7 warehouse robot
+§5 People          Marco Ruiz leads Atlas-7, reports to Dr. Hoffmann
+§6 Specifications  table: payload / speed / battery / navigation
+§7 Support         warranty handled within 30 days
+```
+
+**Ingest it once:** start the app (§5.1), configure a provider, drag the file in
+(or convert via the upload dialog). Then grab its id with the §5 helper and use it
+wherever a snippet says `YOUR_DOC_ID`. The first chat turn triggers the embedding
+and knowledge-graph caches; everything after is fast.
+
+| # | Scenario | Proves | Mode | Needs |
+|---|----------|--------|------|-------|
+| 1 | Grounded, cited answers + out-of-scope refusal | reliability | **live** | app + doc + LLM |
+| 2 | **Plain RAG vs GraphRAG** on a multi-hop question | the differentiator | **live** | doc + LLM |
+| 3 | Graph-of-thought reasoning chains | explainability | **live** | doc + LLM |
+| 4 | Agentic self-critique retrieval | autonomy | **live** | doc + LLM |
+| 5 | Multimodal table / figure QA | breadth | **live** | doc + LLM |
+| 6 | Durable memory + preference seeding | stickiness | **live** | app + LLM |
+| 7 | Retrieval leaderboard | rigor (reproducible) | **offline** | nothing |
+| 8 | Anti-hallucination / faithfulness harness | measurable trust | **offline → live** | LLM for live arm |
+
+> **Tip for a live audience:** run **7 and 8 first on a screen-share to set up
+> credibility** (they need no key and produce hard numbers), then switch to the
+> app and walk 1 → 6 as the narrative. Scenarios 2 and 3 are the centrepiece.
+
+---
+
+### Scenario 1 — Grounded, cited answers + out-of-scope refusal (the promise)
+
+- **Proves:** every answer is traceable to a section, and the assistant **refuses
+  what isn't in the document** instead of inventing it.
+- **Subsystem:** [`agent.py`](../../backend/services/agent.py) SOUL prompt + the
+  `retrieve_context` tool; the empty-context guard in
+  [`retrieval.py`](../../backend/services/retrieval.py).
+- **Mode:** live, in the app.
+
+**Steps (app):**
+1. Ask **"What is the warranty window?"** → answer cites *§7 Support*: *warranty
+   handled within 30 days*.
+2. Ask an **out-of-scope** question — **"What is Acme's employee parking policy?"**
+   (genuinely absent) → *"I don't see this in the document."* No fabrication.
+
+**Headless variant — show the contract at the retrieval layer, before the model speaks:**
+
+```bash
+.venv-ai/Scripts/python.exe -c "from backend.core.config import get_settings; \
+from backend.services import retrieval as r; s=get_settings(); doc='YOUR_DOC_ID'; \
+print('IN-SCOPE :', bool(r.retrieve_context(doc, 'What is the warranty window?', s))); \
+print('OUT      :', repr(r.retrieve_context(doc, 'What is the parking policy?', s)[:80]) or '<empty>')"
+```
+
+**Expected:** the in-scope question returns labelled context (`[Section: Support …]`);
+the out-of-scope question returns **empty context** → the agent refuses.
+
+- **Point at:** the `[Section: …]` citation in the answer; the explicit refusal.
+- **Wow:** *"The refusal is not the model being polite — it's enforced at the
+  retrieval layer: no evidence, no answer."*
+
+---
+
+### Scenario 2 — Plain RAG vs GraphRAG on a multi-hop question (the centrepiece)
+
+- **Proves:** the headline differentiator. On a question whose answer is split
+  across sections, **plain hybrid RAG misses the bridge passage; GraphRAG
+  recovers it** by walking the entity-relation graph — so only GraphRAG answers
+  correctly.
+- **Subsystem:** [`retrieval.hybrid_rank`](../../backend/services/retrieval.py)
+  with/without the fused [`graph_search`](../../backend/services/retrieval.py)
+  signal, backed by the cached [`knowledge_graph.py`](../../backend/services/knowledge_graph.py).
+- **Mode:** live (graph build needs an LLM); plus a fully-offline reproducible arm.
+
+**The question:** **"Where was the founder of Acme Robotics born?"**
+The answer needs two hops: §1 says *Acme was founded by Dr. Lena Hoffmann*; §3 says
+*Hoffmann was born in Lyon*. The words "founder" and "born" never co-occur in one
+section, so BM25/dense rank §1 (or neither) and **drop §3** — the bridge.
+
+**A/B at the retrieval layer (graph OFF vs ON):**
+
+```bash
+.venv-ai/Scripts/python.exe -c "from backend.core.config import get_settings; \
+from backend.services import retrieval as r; s=get_settings(); doc='YOUR_DOC_ID'; \
+q='Where was the founder of Acme Robotics born?'; \
+s.graph_rag.enabled=False; rag,_=r.hybrid_rank(doc,q,s); print('RAG-only units :', rag); \
+s.graph_rag.enabled=True;  g,_  =r.hybrid_rank(doc,q,s); print('GraphRAG units :', g)"
+```
+
+**Expected:** the GraphRAG list contains the **Leadership (§3)** unit — the one
+carrying *born in Lyon* — that the RAG-only list omits. Feed each context to the
+agent and the RAG-only answer is *"the document doesn't say where the founder was
+born,"* while GraphRAG answers **"Lyon."**
+
+**Fully reproducible proof (offline, no key):**
 
 ```bash
 .venv-ai/Scripts/python.exe scripts/ai_eval/run_retrieval_benchmark.py \
-    --dataset scripts/ai_eval/datasets/sample_eval.json -k 5
+  --dataset scripts/ai_eval/datasets/multihop_graph.json -k 2
 ```
 
-**Expected** — leaderboard sorted by nDCG (graph precision `0.6667`, the rest
-`0.2667`; `tree` lowest recall). Matches [EVALUATION.md §4](EVALUATION.md#4-retrieval-benchmarking).
+**Expected:** `graph` scores **recall/precision 1.0**; `hybrid`/`dense` **0.5**;
+`bm25` lower — the bridge unit only surfaces through the graph walk.
 
-**Talk track:** recall@k is the headline metric for a grounded assistant (no
-evidence retrieved → no correct answer); `graph`'s higher precision on the
-"HQ city + founder" question; hybrid is rarely worse than its best component
-because RRF rewards units multiple retrievers agree on.
+- **Point at:** the one extra `unit_id` in the GraphRAG list; the two answers
+  diverging on the *same* question and *same* model — only retrieval changed.
+- **Wow:** *"Same model, same question — the only difference is whether we walked
+  the graph. That single bridge passage is the difference between 'I don't know'
+  and the right answer."*
 
-**Go live:** put real `doc_id`s on each case, drop `ranked_units`, and add
-`--live --variants bm25,dense,tree,hybrid,graph --out runs/retrieval.json` to
-also get a `latency_s_mean` column.
+---
 
-### Scenario 2 — Anti-hallucination / grounding harness (offline → live)
+### Scenario 3 — Graph-of-thought reasoning chains (explainability)
 
-- **Shows:** faithfulness decomposes an answer into atomic claims and NLI-checks
-  each against the retrieved context, then **lists the unsupported claims** — the
-  concrete hallucinations.
+- **Proves:** the assistant can **show its reasoning path**, not just an answer —
+  the explicit relation chain it followed across the document.
+- **Subsystem:** the `reason_over_graph` agent tool →
+  [`knowledge_graph.graph_of_thought_cached`](../../backend/services/knowledge_graph.py).
+- **Mode:** live (LLM for triple/entity extraction; cache built in Scenario 2).
+
+**Steps (app):** ask a relational question — **"How is Marco Ruiz connected to
+Lyon?"** The agent calls `reason_over_graph` and grounds the prose answer in the
+chain.
+
+**Headless:**
+
+```bash
+.venv-ai/Scripts/python.exe -c "from backend.core.config import get_settings; \
+from backend.services import knowledge_graph as kg; s=get_settings(); doc='YOUR_DOC_ID'; \
+print(kg.graph_of_thought_cached(doc, 'How is Marco Ruiz connected to Lyon?', s) \
+      or '<no connecting path>')"
+```
+
+**Expected:** a rendered chain such as
+`Marco Ruiz --[reports to]--> Lena Hoffmann --[born in]--> Lyon` — assembled from
+§5 + §3, two sections that share no keywords with each other.
+
+- **Point at:** the chain hops, each traceable to a source section.
+- **Wow:** *"It doesn't just answer — it shows the path it walked, and every hop
+  is a sentence in the document."*
+
+---
+
+### Scenario 4 — Agentic self-critique retrieval (autonomy)
+
+- **Proves:** when one retrieval pass is insufficient, the agent **names what's
+  missing and fetches it** in a follow-up round, instead of answering half a
+  question.
+- **Subsystem:** [`retrieval.agentic_retrieve_context`](../../backend/services/retrieval.py)
+  (≤3 rounds, ≤2 follow-ups/round, ≤12 accumulated units).
+- **Mode:** live (LLM for the critique step).
+
+```bash
+.venv-ai/Scripts/python.exe -c "from backend.core.config import get_settings; \
+from backend.services import retrieval as r; s=get_settings(); doc='YOUR_DOC_ID'; \
+q='Who leads the Atlas-7 program, and where did the person they report to study?'; \
+print('--- single-shot ---'); print(r.retrieve_context(doc, q, s)[:1200]); \
+print('--- agentic ---');     print(r.agentic_retrieve_context(doc, q, s)[:1200])"
+```
+
+**Expected:** the question spans §5 (Marco → reports to Hoffmann) and §3 (Hoffmann
+→ PhD in Munich). The agentic context accumulates **both**; single-shot may stop
+at the first hop. (GraphRAG and the self-critique loop are complementary — the
+graph gives recall in one pass, the loop recovers when a pass falls short.)
+
+- **Point at:** the second-round follow-up query the critic generated.
+- **Wow:** *"It audits its own evidence and goes back for the missing piece —
+  and if the critique ever flakes, it safely defaults to 'sufficient' so it never
+  hangs."*
+
+---
+
+### Scenario 5 — Multimodal table / figure QA (breadth)
+
+- **Proves:** tables (`tbl*`) and figures (`img*`) are **first-class retrieval
+  units**, parsed lazily at query time — a question about a cell surfaces the
+  table, cells intact.
+- **Subsystem:** [`retrieval.get_retrieval_units`](../../backend/services/retrieval.py)
+  multimodal units + RRF; `read_image` (VLM) for figures.
+- **Mode:** live.
+
+```bash
+# 1) list units → find the tbl* id (the §6 Specifications table)
+.venv-ai/Scripts/python.exe -c "from backend.services import retrieval as r; import json; \
+print(json.dumps([{k:u[k] for k in ('unit_id','kind','title')} \
+for u in r.get_retrieval_units('YOUR_DOC_ID')], indent=2))"
+
+# 2) ask a question whose answer is a single table cell
+.venv-ai/Scripts/python.exe -c "from backend.core.config import get_settings; \
+from backend.services import retrieval as r; \
+print(r.retrieve_context('YOUR_DOC_ID', \
+'What is the Atlas-7 battery life?', get_settings())[:1500])"
+```
+
+**Expected:** the context includes a `[Table: Specifications …]` block with the
+rows intact; the agent answers **"9 hours"** and cites *"Table: Specifications."*
+Content-free `Image N` placeholders are skipped (noise control).
+
+- **Point at:** the `[Table: …]` block in the context and the cited cell.
+- **Wow:** *"It reads the cell, it doesn't guess — and tables already converted
+  work with no re-ingest."*
+
+---
+
+### Scenario 6 — Durable memory + preference seeding (stickiness)
+
+- **Proves:** a session's memory **survives a backend restart**, and a seeded
+  preference shapes every new session.
+- **Subsystem:** [`agent.py`](../../backend/services/agent.py) `AsyncSqliteSaver`
+  checkpointer (`~/.laidocs/data/checkpoints.db`) + preference injection.
+- **Mode:** live, in the app.
+
+**Durable memory:**
+1. **Turn 1:** "What does Acme manufacture?" → *Atlas-7*. **Turn 2:** "What did I
+   just ask?" → it recalls.
+2. **Restart the backend.** Reopen the doc, pick the **same session** in the
+   switcher, ask "What was my first question?" → still recalls (read back from
+   `checkpoints.db`).
+
+**Preference seeding:** add a line to `~/.laidocs/memories/preferences.md` (e.g.
+*"Always answer in Vietnamese, max 2 sentences"*), start a fresh session, ask any
+question → it complies without restatement.
+
+- **Point at:** the session switcher; the recalled first question after restart.
+- **Wow:** *"Close the app, reopen, resume the exact conversation — the memory is
+  on disk, not in RAM."*
+
+> **Scope note:** there is **no runtime write-back store** — the agent does not
+> auto-learn new preferences across sessions (the old DeepAgents `SqliteStore`
+> `/memories/` backend was removed). Preferences are a read-only seed; durability
+> comes from the conversation checkpointer.
+
+---
+
+### Scenario 7 — Retrieval leaderboard (offline, fully reproducible)
+
+- **Proves:** retrieval quality is **measured**, not asserted — five retriever
+  variants ranked head-to-head on a gold dataset, from a clean checkout, no key.
+- **Subsystem:** [`retrieval.py`](../../backend/services/retrieval.py) +
+  [`knowledge_graph.py`](../../backend/services/knowledge_graph.py) +
+  [`evaluation.py`](../../backend/services/evaluation.py).
+- **Mode:** offline.
+
+```bash
+# general leaderboard
+.venv-ai/Scripts/python.exe scripts/ai_eval/run_retrieval_benchmark.py \
+    --dataset scripts/ai_eval/datasets/sample_eval.json -k 5
+# the multi-hop set where graph dominates (pairs with Scenario 2)
+.venv-ai/Scripts/python.exe scripts/ai_eval/run_retrieval_benchmark.py \
+    --dataset scripts/ai_eval/datasets/multihop_graph.json -k 2
+```
+
+**Expected:** leaderboard sorted by nDCG; on the multi-hop set `graph` tops the
+table at recall `1.0`. Recall@k is the headline metric (no evidence retrieved →
+no correct answer); hybrid is rarely worse than its best component because RRF
+rewards units multiple retrievers agree on.
+
+- **Go live:** put real `doc_id`s on each case, drop `ranked_units`, add
+  `--live --variants bm25,dense,tree,hybrid,graph --out runs/retrieval.json` for a
+  `latency_s_mean` column too. Full method in [EVALUATION.md §4](EVALUATION.md#4-retrieval-benchmarking).
+
+---
+
+### Scenario 8 — Anti-hallucination / faithfulness harness (measurable trust)
+
+- **Proves:** "grounded" is a **number**. Faithfulness decomposes an answer into
+  atomic claims, NLI-checks each against the retrieved context, and **lists the
+  unsupported ones** — the concrete hallucinations.
 - **Subsystem:** [`evaluation.py`](../../backend/services/evaluation.py) (RAGAS-style judge).
-- **Mode:** offline dry-run (wiring check) → live (real LLM judge).
+- **Mode:** offline dry-run (wiring) → live (real LLM judge).
 
 ```bash
 # offline wiring check — neutral judge, zero model calls
 .venv-ai/Scripts/python.exe scripts/ai_eval/run_grounding_eval.py \
     --dataset scripts/ai_eval/datasets/sample_eval.json --dry-run
-```
-
-**Expected (dry-run):** `faithfulness 1.0000` (neutral), `answer_relevance 0.0000`,
-`context_relevance 0.0000`. The neutral judge **never reports a false
-hallucination** — an unconfigured environment degrades safely.
-
-```bash
-# real evaluation — needs a configured provider
+# live — real judge, per-question "Unsupported claims" list
 .venv-ai/Scripts/python.exe scripts/ai_eval/run_grounding_eval.py \
     --dataset scripts/ai_eval/datasets/sample_eval.json --out runs/grounding.json
 ```
 
-**Expected (live):** aggregate `faithfulness` / `answer_relevance` /
-`context_relevance`, plus a per-question **"Unsupported claims"** list. To make a
-hallucination visible, edit one case's `answer` to assert a wrong number and
-re-run — that claim is flagged.
+**Expected (dry-run):** `faithfulness 1.0000` (neutral), `answer_relevance 0.0000`
+— the neutral judge **never reports a false hallucination**, so an unconfigured
+environment degrades safely. **(live):** aggregate scores plus per-question
+unsupported claims. To make a hallucination visible, edit one case's `answer` to
+assert a wrong number and re-run — that claim gets flagged.
 
-**Talk track:** the safe-degradation property (no judge → `1.0`, never a false
-positive) and that this is the harness which turns "looks fine in chat" into a
-number. Full method + adversarial tests in [EVALUATION.md §5](EVALUATION.md#5-grounding--hallucination-evaluation).
-
-### Scenario 3 — Citation-grounded QA & out-of-scope refusal (the headline)
-
-- **Shows:** the core promise — answers cite the section they came from, and the
-  assistant refuses what isn't in the document instead of fabricating.
-- **Subsystem:** [`agent.py`](../../backend/services/agent.py) SOUL prompt + the
-  `retrieve_context` tool.
-- **Mode:** live, in the app.
-
-**In the app:**
-1. Start the app (§5.1), configure a provider, and ingest a structured PDF
-   (a paper, policy, or handbook with clear headings).
-2. Ask a factual question answerable from one section → the answer cites it,
-   e.g. *"[Section: Refunds] …"*.
-3. Ask an **out-of-scope** question (something genuinely absent) → *"I don't see
-   this in the document"* — no fabrication.
-
-**Headless variant (no UI), to show the retrieval-layer contract directly:**
-
-```bash
-.venv-ai/Scripts/python.exe -c "from backend.core.config import get_settings; \
-from backend.services import retrieval as r; \
-ctx = r.retrieve_context('YOUR_DOC_ID', 'An in-scope question?', get_settings()); \
-print(ctx[:1500] or '<empty context -> treated as out-of-scope>')"
-```
-
-**Expected:** an in-scope question returns labelled context (`[Section: …]` /
-`[Table: …]`); a genuinely out-of-scope question returns **empty context** — the
-anti-hallucination contract enforced at the retrieval layer, before the model
-ever speaks.
-
-**Talk track:** the empty-context → refusal path *is* the reliability story;
-cited sections make every answer auditable.
-
-### Scenario 4 — Agentic multi-hop retrieval (live)
-
-- **Shows:** single-shot vs iterative self-critique. On a question whose answer
-  is split across two sections, the agentic loop names the missing piece and
-  fetches it in a follow-up round.
-- **Subsystem:** [`retrieval.agentic_retrieve_context`](../../backend/services/retrieval.py)
-  (≤3 rounds, ≤2 follow-ups/round, ≤12 accumulated units).
-- **Mode:** live (needs an LLM for the critique step).
-
-```bash
-.venv-ai/Scripts/python.exe -c "from backend.core.config import get_settings; \
-from backend.services import retrieval as r; s=get_settings(); doc='YOUR_DOC_ID'; \
-q='Which city is the company HQ in, and who founded it?'; \
-print('--- single-shot ---'); print(r.retrieve_context(doc, q, s)[:1200]); \
-print('--- agentic ---');     print(r.agentic_retrieve_context(doc, q, s)[:1200])"
-```
-
-**Expected:** the agentic context contains **both** facts (HQ city *and*
-founder); single-shot may surface only the first hop. Quantify the recall lift in
-[EVALUATION.md §6](EVALUATION.md#6-agentic-retrieval-evaluation).
-
-**Talk track:** worst case degrades to single-shot — a flaky critique defaults to
-`sufficient=true`, so the loop never hangs; the cost is up to ~3× the calls,
-which the live benchmark's latency column quantifies.
-
-### Scenario 5 — Multimodal table / figure QA (live)
-
-- **Shows:** figures (`img*`) and tables (`tbl*`) are first-class retrieval
-  units, parsed **lazily at query time** from the stored Markdown — so a question
-  about a table cell or a figure caption surfaces that unit (no re-ingest).
-- **Subsystem:** [`retrieval.get_retrieval_units`](../../backend/services/retrieval.py)
-  multimodal units + RRF.
-- **Mode:** live (a document that actually has a table and/or figure).
-
-```bash
-# 1) list the units to find the tbl* / img* ids
-.venv-ai/Scripts/python.exe -c "from backend.services import retrieval as r; \
-import json; print(json.dumps([{k:u[k] for k in ('unit_id','kind','title')} \
-for u in r.get_retrieval_units('YOUR_DOC_ID')], indent=2))"
-
-# 2) ask a question whose answer lives in a cell / caption
-.venv-ai/Scripts/python.exe -c "from backend.core.config import get_settings; \
-from backend.services import retrieval as r; \
-print(r.retrieve_context('YOUR_DOC_ID', \
-'What were total revenues in the most recent year?', get_settings())[:1500])"
-```
-
-**Expected:** the context includes a `[Table: …]` block (cells kept intact) or a
-`[Figure: …]` block (caption + VLM description). Content-free `Image N` figures
-are skipped (noise control).
-
-**Talk track:** units are parsed at query time so already-converted documents
-work with no re-ingest; the model cites *"Table: …"* / *"Figure: …"*. Benchmark
-recall on a `tbl*`/`img*` dataset in [EVALUATION.md §8](EVALUATION.md#8-multimodal-evaluation).
-
-### Scenario 6 — Knowledge graph + graph-of-thought (live)
-
-- **Shows:** an entity-relation graph built from the same units. A multi-hop walk
-  returns the supporting `unit_id`s (shaped to fuse into RRF), and
-  graph-of-thought renders explicit reasoning chains like
-  `A --[founded by]--> B --[located in]--> C`.
-- **Subsystem:** [`knowledge_graph.py`](../../backend/services/knowledge_graph.py).
-- **Mode:** live (LLM needed for triple/entity extraction).
-
-```bash
-.venv-ai/Scripts/python.exe -c "from backend.core.config import get_settings; \
-from backend.services import knowledge_graph as kg; s=get_settings(); \
-doc='YOUR_DOC_ID'; q='Who founded the company and where is it based?'; \
-print('augmented units:', kg.graph_augmented_units(doc, q, s)); \
-print(kg.graph_of_thought(doc, q, s) or '<no connecting path>')"
-```
-
-**Expected:** `graph_augmented_units` returns a ranked list of `unit_id`s;
-`graph_of_thought` prints the relation paths between the question's entities
-(empty when no LLM/extractor or no connecting path exists).
-
-**Talk track:** this is a **parallel retrieval track** shaped to fuse into
-`rrf_fuse`. It currently runs from scripts/tests and is **not yet wired into the
-live agent answer path** (see §1.3) — an intentional, documented boundary. Its
-precision edge is already visible in Scenario 1's leaderboard.
-
-### Scenario 7 — Durable memory / personalization (live, in the app)
-
-- **Shows:** preferences survive a session reset **and** a restart, via the
-  `SqliteStore` at `~/.laidocs/data/memory_store.db` — Turn 3 honours a Turn 1
-  preference without restatement.
-- **Subsystem:** [`agent.py`](../../backend/services/agent.py) durable store +
-  `/memories/`.
-- **Mode:** live, in the app.
-
-1. **Turn 1:** "Answer me in Vietnamese and keep answers to 2 sentences."
-2. **Turn 2:** a normal document question — observe it complies.
-3. **New session** (resets the checkpointer, keeps the store) → **Turn 3:** a
-   fresh document question, *without* restating the preference.
-
-**Expected:** Turn 3 is still Vietnamese and ~2 sentences. For the A/B that
-*proves* the effect, wipe `memory_store.db` and the seed `preferences.md`, repeat,
-and watch Turn 3 revert to the default ([EVALUATION.md §7](EVALUATION.md#7-long-term-memory-evaluation)).
-
-**Talk track:** memory stores **preferences, not document facts** — verify it
-never injects an ungrounded claim (faithfulness *with* memory ≈ *without*).
+- **Point at:** the "Unsupported claims" list; the safe-degradation `1.0`.
+- **Wow:** *"This is the harness that turns 'looks fine in chat' into a score we
+  can regression-test."* Adversarial tests in [EVALUATION.md §5](EVALUATION.md#5-grounding--hallucination-evaluation).
 
 ---
 

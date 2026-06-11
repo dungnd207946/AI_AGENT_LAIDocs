@@ -1,0 +1,45 @@
+[
+  {
+    "_comment": "Multi-hop dataset for GraphRAG. Each gold answer is split across sections connected only through a shared entity, so lexical/dense retrievers that match the QUESTION's words miss the bridge unit. The 'graph' variant walks the entity-relation graph and recovers it. Run OFFLINE to see the lift from the ranked_units below, or LIVE against a real doc with --variants bm25,dense,hybrid,graph.",
+    "question": "Where was the founder of Acme Corp born?",
+    "gold_units": ["s_company", "s_bio"],
+    "doc_id": "REPLACE_WITH_REAL_DOC_ID",
+    "ranked_units": {
+      "bm25":   ["s_company", "s_products", "s_misc", "s_legal", "s_bio"],
+      "dense":  ["s_company", "s_products", "s_misc", "s_legal", "s_bio"],
+      "tree":   ["s_company"],
+      "hybrid": ["s_company", "s_products", "s_misc", "s_legal", "s_bio"],
+      "graph":  ["s_company", "s_bio"]
+    },
+    "context": "[Section: Company (node s_company)] Acme Corp was founded by Jane Doe. [Section: Bio (node s_bio)] Jane Doe was born in Lyon.",
+    "answer": "The founder of Acme Corp, Jane Doe, was born in Lyon."
+  },
+  {
+    "question": "What product is made by the company that John Smith works for?",
+    "gold_units": ["s_people", "s_products"],
+    "doc_id": "REPLACE_WITH_REAL_DOC_ID",
+    "ranked_units": {
+      "bm25":   ["s_people", "s_misc", "s_company", "s_legal", "s_products"],
+      "dense":  ["s_people", "s_company", "s_misc", "s_legal", "s_products"],
+      "tree":   ["s_people"],
+      "hybrid": ["s_people", "s_company", "s_misc", "s_legal", "s_products"],
+      "graph":  ["s_people", "s_products"]
+    },
+    "context": "[Section: People (node s_people)] John Smith works at Acme Corp. [Section: Products (node s_products)] Acme Corp makes the Widget 3000.",
+    "answer": "John Smith works at Acme Corp, which makes the Widget 3000."
+  },
+  {
+    "question": "Which city hosts the headquarters of the firm Jane Doe founded?",
+    "gold_units": ["s_company", "s_hq"],
+    "doc_id": "REPLACE_WITH_REAL_DOC_ID",
+    "ranked_units": {
+      "bm25":   ["s_misc", "s_people", "s_legal", "s_company", "s_hq"],
+      "dense":  ["s_company", "s_misc", "s_people", "s_legal", "s_hq"],
+      "tree":   ["s_company"],
+      "hybrid": ["s_company", "s_misc", "s_people", "s_legal", "s_hq"],
+      "graph":  ["s_company", "s_hq"]
+    },
+    "context": "[Section: Company (node s_company)] Acme Corp was founded by Jane Doe. [Section: HQ (node s_hq)] Acme Corp is headquartered in Berlin.",
+    "answer": "Acme Corp, founded by Jane Doe, is headquartered in Berlin."
+  }
+]

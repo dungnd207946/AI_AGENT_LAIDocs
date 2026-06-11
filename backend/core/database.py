@@ -82,6 +82,19 @@ _MIGRATIONS = [
     FOREIGN KEY (message_id) REFERENCES chat_messages(id) ON DELETE CASCADE
 )""",
     "CREATE INDEX IF NOT EXISTS idx_chat_message_evidence_doc ON chat_message_evidence(doc_id)",
+    # Knowledge-graph triple cache, one row per retrieval unit (mirrors
+    # document_embeddings). ``triples`` is a JSON list of [subject, relation,
+    # object]; ``unit_hash`` + ``model`` invalidate stale rows when the unit's
+    # content or the extractor LLM changes, so only changed units are re-extracted.
+    """CREATE TABLE IF NOT EXISTS document_graph_units (
+    doc_id TEXT NOT NULL,
+    unit_id TEXT NOT NULL,
+    unit_hash TEXT NOT NULL DEFAULT '',
+    model TEXT NOT NULL DEFAULT '',
+    triples TEXT NOT NULL DEFAULT '[]',
+    PRIMARY KEY (doc_id, unit_id)
+)""",
+    "CREATE INDEX IF NOT EXISTS idx_doc_graph_units_doc_model ON document_graph_units(doc_id, model)",
 ]
 
 

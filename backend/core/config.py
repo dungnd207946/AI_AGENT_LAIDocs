@@ -34,12 +34,22 @@ class RerankerConfig(BaseModel):
     timeout_s: float = 20.0
 
 
+class GraphRagConfig(BaseModel):
+    # GraphRAG: fuse an entity-relation graph walk into hybrid retrieval and
+    # expose graph-of-thought reasoning to the agent. Requires an LLM (triple
+    # extraction); degrades to a no-op when disabled or unconfigured.
+    enabled: bool = True
+    hops: int = 2                  # how many edges to walk from the question's entities
+    max_units: int = 8            # cap graph-contributed units fused per query
+
+
 class Settings(BaseSettings):
     """LAIDocs application settings persisted to ~/.laidocs/config.json and loaded from .env."""
 
     llm: LLMConfig = LLMConfig()
     vlm: LLMConfig = LLMConfig()
     reranker: RerankerConfig = RerankerConfig()
+    graph_rag: GraphRagConfig = GraphRagConfig()
     port: int = 8008
     telemetry_url: str = "http://localhost:8001/api/v1/track"
     telemetry_enabled: bool = True
@@ -75,6 +85,10 @@ class Settings(BaseSettings):
     @property
     def active_reranker(self) -> RerankerConfig:
         return self.reranker.model_copy()
+
+    @property
+    def active_graph_rag(self) -> GraphRagConfig:
+        return self.graph_rag.model_copy()
 
     model_config = SettingsConfigDict(
         arbitrary_types_allowed=True,

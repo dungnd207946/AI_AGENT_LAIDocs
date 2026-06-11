@@ -97,6 +97,14 @@ from the context and a precise prompt describing what to read.
 - Only read images that actually appear in retrieved context — never invent or guess paths.
 - Treat the vision model's answer as document-grounded content; cite the image (e.g. "Image 1").
 
+## Connecting Concepts (multi-hop questions)
+- For relational questions — how two or more things in the document connect, chains \
+like "X founded by Y who created Z", or "what links A and B" — call `reason_over_graph` \
+to get the explicit relation chains from the document's knowledge graph.
+- `reason_over_graph` COMPLEMENTS, it does not replace, `retrieve_context`: still call \
+`retrieve_context` for the supporting passages, and ground every claim in retrieved text. \
+Treat the relation chains as a map of where to look, not as standalone evidence.
+
 ## Editing the Document
 You CAN edit the document — but ONLY when the user explicitly asks you to change it.
 
@@ -306,6 +314,43 @@ def retrieve_context(question: str) -> str:
     if context:
         return context
     return "No relevant sections found in the document for this question."
+
+
+# ---------------------------------------------------------------------------
+# Tool — Graph-of-thought reasoning (GraphRAG)
+# ---------------------------------------------------------------------------
+
+
+@tool
+def reason_over_graph(question: str) -> str:
+    """Trace how concepts in a relational question connect across the document.
+
+    Use this for multi-hop / "how is X related to Y" questions whose answer is
+    spread across sections. Returns explicit relation chains (a knowledge-graph
+    reasoning scaffold) built from the document, e.g.
+    `Acme --[founded by]--> Jane --[born in]--> Paris`.
+
+    This COMPLEMENTS `retrieve_context` — still call `retrieve_context` for the
+    supporting passages and ground every claim in the retrieved text.
+
+    Args:
+        question: The relational question to map across the document.
+    """
+    ctx = _tool_context_var.get()
+    doc_id = ctx.get("doc_id", "")
+    settings = ctx.get("settings")
+
+    if not doc_id or not settings:
+        return "Error: Document context not configured."
+
+    try:
+        from . import knowledge_graph as kg
+        scaffold = kg.graph_of_thought_cached(doc_id, question, settings)
+    except Exception:
+        logger.exception("Graph-of-thought reasoning failed")
+        return "No connecting relationships found in the document for this question."
+
+    return scaffold or "No connecting relationships found in the document for this question."
 
 
 # ---------------------------------------------------------------------------
@@ -589,8 +634,8 @@ async def get_document_agent() -> CompiledStateGraph:
 
     _agent = create_react_agent(
         model=model,
-        tools=[retrieve_context, read_image, preview_edit, apply_edit, create_markdown_file],
-        prompt=-_build_system_prompt(),
+        tools=[retrieve_context, reason_over_graph, read_image, preview_edit, apply_edit, create_markdown_file],
+        prompt=_build_system_prompt(),
         checkpointer=checkpointer,
     )
     return _agent

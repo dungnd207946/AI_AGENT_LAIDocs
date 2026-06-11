@@ -37,6 +37,7 @@ from dataclasses import dataclass, field
 from typing import Callable, Sequence
 
 from ..core.config import Settings, get_settings
+from ..core.database import get_db
 from .llm import create_chat_model, is_llm_configured
 from . import retrieval
 
@@ -460,6 +461,212 @@ def graph_of_thought(
     if not triples:
         return ""
     graph = build_graph(triples)
+
+    q_entities = extract_query_entities(question, extractor)
+    paths = reason_paths(graph, q_entities, max_len=max_len)
+    return render_reasoning(paths)
+
+
+# ---------------------------------------------------------------------------
+# Persistent graph cache (the live-path enabler)
+#
+# The functions above rebuild the whole graph at query time — one LLM call per
+# unit, every question — which is why graph reasoning was never wired into the
+# live agent. The cache below mirrors the dense-embedding cache in retrieval.py:
+# triples are extracted per retrieval unit ONCE and persisted, keyed by the
+# unit's content hash + extractor model, so only changed units are re-extracted.
+# Query time then costs one cheap query-entity call plus a deterministic walk.
+# ---------------------------------------------------------------------------
+
+
+def _active_extractor_model(settings: Settings) -> str:
+    """Tag rows with the extractor model so a model change invalidates them."""
+    return settings.active_llm.model or "default"
+
+
+def ensure_graph_index(
+    doc_id: str,
+    settings: Settings | None = None,
+    *,
+    units: list[dict] | None = None,
+    extractor: Extractor | None = None,
+) -> bool:
+    """Build & persist missing/stale triples for a doc. Idempotent, incremental.
+
+    Mirrors ``retrieval.ensure_embedding_index``: cache validity is per
+    retrieval unit (keyed by ``unit_hash`` + extractor ``model``), so editing
+    one chunk only re-extracts that chunk. A unit that yields no triples is
+    still recorded (``triples='[]'``) so it is not re-extracted every call.
+
+    Returns False when no extractor is configured or the document has no units.
+    """
+    from . import retrieval  # local import avoids a circular import at module load
+
+    settings = settings or get_settings()
+    extractor = _resolve_extractor(extractor, settings)
+    if extractor is None:
+        return False
+
+    units = units if units is not None else retrieval.get_retrieval_units(doc_id)
+    if not units:
+        return False
+
+    model = _active_extractor_model(settings)
+    current_units_by_id = {
+        str(u.get("unit_id") or ""): u
+        for u in units
+        if str(u.get("unit_id") or "")
+    }
+    current_hashes = {
+        uid: retrieval._compute_unit_hash(u)
+        for uid, u in current_units_by_id.items()
+    }
+
+    with get_db() as conn:
+        rows = conn.execute(
+            "SELECT unit_id, unit_hash FROM document_graph_units WHERE doc_id=? AND model=?",
+            (doc_id, model),
+        ).fetchall()
+
+    cached = {str(row["unit_id"]): (row["unit_hash"] or "") for row in rows}
+    missing = [uid for uid, h in current_hashes.items() if cached.get(uid) != h]
+    stale = [
+        uid
+        for uid in cached
+        if uid not in current_hashes or cached.get(uid) != current_hashes.get(uid)
+    ]
+
+    if not missing:
+        if stale:
+            with get_db() as conn:
+                conn.executemany(
+                    "DELETE FROM document_graph_units WHERE doc_id=? AND model=? AND unit_id=?",
+                    [(doc_id, model, uid) for uid in stale],
+                )
+        return True
+
+    rows_to_write: list[tuple] = []
+    for uid in missing:
+        unit = current_units_by_id[uid]
+        triples = extract_triples_from_units([unit], extractor)
+        payload = [[t.subject, t.relation, t.obj] for t in triples]
+        rows_to_write.append(
+            (doc_id, uid, current_hashes[uid], model, json.dumps(payload, ensure_ascii=False))
+        )
+
+    with get_db() as conn:
+        conn.execute("BEGIN")
+        if stale:
+            conn.executemany(
+                "DELETE FROM document_graph_units WHERE doc_id=? AND model=? AND unit_id=?",
+                [(doc_id, model, uid) for uid in stale],
+            )
+        conn.executemany(
+            """INSERT OR REPLACE INTO document_graph_units
+               (doc_id, unit_id, unit_hash, model, triples)
+               VALUES (?, ?, ?, ?, ?)""",
+            rows_to_write,
+        )
+    return True
+
+
+async def ensure_graph_index_async(doc_id: str, settings: Settings | None = None) -> bool:
+    """Background-friendly wrapper: run the (blocking, LLM-bound) build off-thread.
+
+    Used by the ingest background task so graph extraction never blocks the
+    event loop. Failures are swallowed — graph retrieval degrades to a no-op.
+    """
+    import asyncio
+
+    settings = settings or get_settings()
+    try:
+        return await asyncio.to_thread(ensure_graph_index, doc_id, settings)
+    except Exception:
+        logger.exception("Background graph index build failed for doc %s", doc_id)
+        return False
+
+
+def load_graph(doc_id: str, settings: Settings | None = None) -> KnowledgeGraph:
+    """Assemble the KnowledgeGraph for a doc from its cached triples (no LLM)."""
+    settings = settings or get_settings()
+    model = _active_extractor_model(settings)
+    with get_db() as conn:
+        rows = conn.execute(
+            "SELECT unit_id, triples FROM document_graph_units WHERE doc_id=? AND model=?",
+            (doc_id, model),
+        ).fetchall()
+
+    triples: list[Triple] = []
+    for row in rows:
+        uid = str(row["unit_id"])
+        try:
+            data = json.loads(row["triples"] or "[]")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        if not isinstance(data, list):
+            continue
+        for item in data:
+            if isinstance(item, (list, tuple)) and len(item) == 3:
+                subj, rel, obj = (str(x).strip() for x in item)
+                if subj and rel and obj:
+                    triples.append(Triple(subj, rel, obj, uid))
+    return build_graph(triples)
+
+
+def graph_augmented_units_cached(
+    doc_id: str,
+    question: str,
+    settings: Settings | None = None,
+    *,
+    hops: int = MAX_HOPS,
+) -> list[str]:
+    """Cache-backed ``graph_augmented_units`` for the live retrieval path.
+
+    Ensures the persisted graph is current (incremental, cheap if warm), loads
+    it deterministically, then does ONE query-entity LLM call + a graph walk.
+    Returns source unit ids ordered by hop distance, ready to fuse into
+    ``retrieval.rrf_fuse``. No-op (``[]``) when unavailable or nothing connects.
+    """
+    settings = settings or get_settings()
+    extractor = _resolve_extractor(None, settings)
+    if extractor is None:
+        return []
+    if not ensure_graph_index(doc_id, settings, extractor=extractor):
+        return []
+
+    graph = load_graph(doc_id, settings)
+    if not graph.labels:
+        return []
+
+    q_entities = extract_query_entities(question, extractor)
+    seeds = match_entities(graph, q_entities)
+    if not seeds:
+        return []
+
+    reached, _edges = k_hop_subgraph(graph, seeds, hops=hops)
+    seed_set = set(seeds)
+    ordered = list(seeds) + [e for e in reached if e not in seed_set]
+    return units_for_entities(graph, ordered)
+
+
+def graph_of_thought_cached(
+    doc_id: str,
+    question: str,
+    settings: Settings | None = None,
+    *,
+    max_len: int = MAX_PATH_LEN,
+) -> str:
+    """Cache-backed ``graph_of_thought`` — the reasoning scaffold for the agent."""
+    settings = settings or get_settings()
+    extractor = _resolve_extractor(None, settings)
+    if extractor is None:
+        return ""
+    if not ensure_graph_index(doc_id, settings, extractor=extractor):
+        return ""
+
+    graph = load_graph(doc_id, settings)
+    if not graph.labels:
+        return ""
 
     q_entities = extract_query_entities(question, extractor)
     paths = reason_paths(graph, q_entities, max_len=max_len)
