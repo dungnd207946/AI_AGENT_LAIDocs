@@ -445,11 +445,11 @@ def create_markdown_file(filename: str | None = None, content: str | None = None
     
     Args:
         filename: Optional custom name (e.g., "my-report", "summary"). 
-                 If None, generates "report-{doc_id}.md"
         content: Text to save. If None, uses latest assistant reply from chat history.
     
     Returns:
         Success message with download URL to the saved file.
+        Using format returned by the tool allows the agent to include the answer 
     """
     ctx = _tool_context_var.get()
     doc_id = ctx.get("doc_id", "")
@@ -570,7 +570,7 @@ async def get_document_agent() -> CompiledStateGraph:
     _agent = create_react_agent(
         model=model,
         tools=[retrieve_context, read_image, preview_edit, apply_edit, create_markdown_file],
-        prompt=DOCUMENT_SOUL_PROMPT,
+        prompt=-_build_system_prompt(),
         checkpointer=checkpointer,
     )
     return _agent
