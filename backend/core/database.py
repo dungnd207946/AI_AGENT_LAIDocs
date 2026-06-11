@@ -82,6 +82,16 @@ _MIGRATIONS = [
     FOREIGN KEY (message_id) REFERENCES chat_messages(id) ON DELETE CASCADE
 )""",
     "CREATE INDEX IF NOT EXISTS idx_chat_message_evidence_doc ON chat_message_evidence(doc_id)",
+    # Graph-of-thought reasoning chain produced by reason_over_graph for an
+    # assistant message, so the UI can re-render the chain on history reload.
+    """CREATE TABLE IF NOT EXISTS chat_message_chains (
+    message_id INTEGER PRIMARY KEY,
+    doc_id TEXT NOT NULL,
+    chain TEXT NOT NULL DEFAULT '',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (message_id) REFERENCES chat_messages(id) ON DELETE CASCADE
+)""",
+    "CREATE INDEX IF NOT EXISTS idx_chat_message_chains_doc ON chat_message_chains(doc_id)",
     # Knowledge-graph triple cache, one row per retrieval unit (mirrors
     # document_embeddings). ``triples`` is a JSON list of [subject, relation,
     # object]; ``unit_hash`` + ``model`` invalidate stale rows when the unit's

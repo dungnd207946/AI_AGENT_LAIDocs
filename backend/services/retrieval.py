@@ -337,8 +337,25 @@ def build_context_from_units(units: list[dict]) -> str:
     return ctx.strip()
 
 
+def _evidence_preview(unit: dict, *, limit: int = 220) -> str:
+    """One-line snippet of a unit's text for citation hover/preview (no newlines)."""
+    text = " ".join(str(unit.get("text") or "").split())
+    return text[:limit] + ("…" if len(text) > limit else "")
+
+
+def _evidence_heading_path(unit: dict) -> list[str]:
+    raw = unit.get("heading_path") or []
+    if not isinstance(raw, list):
+        raw = [str(raw)]
+    return [str(item).strip() for item in raw if str(item).strip()]
+
+
 def evidence_from_units(units: list[dict]) -> list[dict]:
-    """Return stable evidence metadata for retrieved units."""
+    """Return stable evidence metadata for retrieved units.
+
+    Includes ``heading_path`` and a one-line ``preview`` so the UI can render
+    citation chips and jump-to-source without a second backend round trip.
+    """
     evidence: list[dict] = []
     seen: set[str] = set()
     for unit in units:
@@ -352,6 +369,8 @@ def evidence_from_units(units: list[dict]) -> list[dict]:
                 "unit_hash": _compute_unit_hash(unit),
                 "title": unit.get("title") or "",
                 "kind": unit.get("kind") or "text",
+                "heading_path": _evidence_heading_path(unit),
+                "preview": _evidence_preview(unit),
             }
         )
     return evidence

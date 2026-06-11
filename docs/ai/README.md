@@ -81,7 +81,8 @@ AI layer to function.
 To keep this handbook honest, the following are **implemented and tested**:
 hybrid retrieval (BM25 + dense + tree + RRF), agentic multi-hop retrieval,
 multimodal figure/table units, the evaluation harness, the knowledge graph and
-graph-of-thought.
+graph-of-thought, and the **demo UI** that surfaces all of the above in the
+chat panel (see below).
 
 The following are **referenced in the literature but NOT in this codebase** —
 do not expect commands for them: ColBERT / late-interaction retrieval,
@@ -99,6 +100,25 @@ extension points, not features.
 > the query-time cost is ~one LLM call. `evaluation.py` remains a standalone
 > harness invoked from scripts/tests (not the answer path) — an intentional,
 > documented boundary.
+
+> **Demo UI (in the chat panel).** The retrieval/graph work is now visible in
+> the app, not just headless scripts:
+> - **Citations + grounding badge** — every answer shows a "Grounded · N sources"
+>   badge and clickable source chips (hover for a snippet); clicking a chip
+>   scrolls the document preview to that section (jump-to-source). Backed by the
+>   SSE `[EVIDENCE]` event + `evidence_from_units` (now carries `heading_path` +
+>   `preview`); persisted/rebuilt for history via `chat_history.get_display_messages`.
+> - **Reasoning-path view** — when the agent calls `reason_over_graph`, the
+>   relation chain (`A --[rel]--> B --[rel]--> C`) renders as node/edge chips.
+>   Backed by the SSE `[CHAIN]` event + the `chat_message_chains` table.
+> - **RAG-vs-GraphRAG compare** — a **Demo-mode** toggle (chat header) reveals a
+>   "Compare RAG vs GraphRAG" button that calls the stateless `POST
+>   /api/chat/compare` endpoint and shows both answers side by side, with the
+>   **bridge passage** GraphRAG recovered highlighted. This is Scenario 2's
+>   headless A/B, made clickable.
+>
+> Frontend: `CitationChips.tsx`, `ReasoningChain.tsx`, `CompareDrawer.tsx`,
+> wired through `ChatPanel.tsx` + `DocumentEditor.tsx`.
 
 ---
 
@@ -409,6 +429,9 @@ print('OUT      :', repr(r.retrieve_context(doc, 'What is the parking policy?', 
 **Expected:** the in-scope question returns labelled context (`[Section: Support …]`);
 the out-of-scope question returns **empty context** → the agent refuses.
 
+- **In-app:** the grounded answer shows a **"Grounded · N sources"** badge and
+  clickable **citation chips**; click one to jump to that section in the
+  document preview. The out-of-scope answer shows **no chips** — nothing to cite.
 - **Point at:** the `[Section: …]` citation in the answer; the explicit refusal.
 - **Wow:** *"The refusal is not the model being polite — it's enforced at the
   retrieval layer: no evidence, no answer."*
@@ -456,8 +479,14 @@ born,"* while GraphRAG answers **"Lyon."**
 **Expected:** `graph` scores **recall/precision 1.0**; `hybrid`/`dense` **0.5**;
 `bm25` lower — the bridge unit only surfaces through the graph walk.
 
-- **Point at:** the one extra `unit_id` in the GraphRAG list; the two answers
-  diverging on the *same* question and *same* model — only retrieval changed.
+**In-app (clickable A/B):** turn on **Demo mode** (toggle in the chat header),
+type the question, and hit **"Compare RAG vs GraphRAG"**. The `CompareDrawer`
+shows both answers side by side and highlights the **bridge passage** GraphRAG
+recovered — the same A/B as the headless command, no terminal needed.
+
+- **Point at:** the one extra `unit_id` in the GraphRAG list (highlighted green
+  in the drawer); the two answers diverging on the *same* question and *same*
+  model — only retrieval changed.
 - **Wow:** *"Same model, same question — the only difference is whether we walked
   the graph. That single bridge passage is the difference between 'I don't know'
   and the right answer."*
@@ -489,6 +518,9 @@ print(kg.graph_of_thought_cached(doc, 'How is Marco Ruiz connected to Lyon?', s)
 `Marco Ruiz --[reports to]--> Lena Hoffmann --[born in]--> Lyon` — assembled from
 §5 + §3, two sections that share no keywords with each other.
 
+- **In-app:** the answer renders the chain as a **"Reasoning path"** strip of
+  node/edge chips (`Marco Ruiz → reports to → Lena Hoffmann → born in → Lyon`),
+  collapsible, right above the citation chips.
 - **Point at:** the chain hops, each traceable to a source section.
 - **Wow:** *"It doesn't just answer — it shows the path it walked, and every hop
   is a sentence in the document."*

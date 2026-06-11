@@ -350,6 +350,9 @@ def reason_over_graph(question: str) -> str:
         logger.exception("Graph-of-thought reasoning failed")
         return "No connecting relationships found in the document for this question."
 
+    if scaffold:
+        # Expose the chain to the stream so the UI can render the reasoning path.
+        ctx["reasoning_chain"] = scaffold
     return scaffold or "No connecting relationships found in the document for this question."
 
 
@@ -659,6 +662,12 @@ def get_retrieved_evidence() -> list[dict]:
     """Return retrieval-unit evidence collected during the current request."""
     evidence = _tool_context_var.get().get("retrieved_units", [])
     return evidence if isinstance(evidence, list) else []
+
+
+def get_reasoning_chain() -> str:
+    """Return the graph-of-thought chain produced this request (or '')."""
+    chain = _tool_context_var.get().get("reasoning_chain", "")
+    return chain if isinstance(chain, str) else ""
 
 
 def reset_agent() -> None:
