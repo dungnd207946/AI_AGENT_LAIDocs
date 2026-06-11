@@ -24,6 +24,8 @@ import re
 import unicodedata
 from pathlib import Path
 
+from . import retrieval
+
 from ..core.config import LAIDOCS_HOME
 
 DOWNLOADS_DIR = LAIDOCS_HOME / "downloads"
