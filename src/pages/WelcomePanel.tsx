@@ -347,7 +347,7 @@ export default function WelcomePanel() {
             icon={<IconMessageAI />}
             label="Chat Engine"
             headline="Agentic Chat with Documents"
-            description="Engage with a DeepAgents-powered assistant that strictly answers from context, remembers history, and manages sessions."
+            description="Engage with a React Agents-powered assistant that strictly answers from context, remembers history, and manages sessions."
             techStack={["DeepAgents", "Reasoning-based RAG"]}
             accentColor="#fbbf24"
             delay={380}
@@ -366,7 +366,7 @@ export default function WelcomePanel() {
             animationDelay: "0.44s",
           }}
         >
-          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          {/* <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
             <span style={{ fontSize: 11, color: "var(--text-faint)", letterSpacing: "0.2px" }}>
               © 2026 Dino
             </span>
@@ -383,7 +383,7 @@ export default function WelcomePanel() {
             }}>
               v1.0
             </span>
-          </div>
+          </div> */}
           {/* <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="var(--text-faint)" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
               <rect x="2" y="4" width="20" height="16" rx="2" />

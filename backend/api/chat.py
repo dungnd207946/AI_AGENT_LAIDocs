@@ -33,6 +33,7 @@ from ..services.chat_history import (
     save_message_evidence,
     start_new_session,
     delete_messages,
+    delete_session,
 )
 from ..services.compactor import compact_if_needed
 
@@ -255,3 +256,14 @@ async def clear_chat_history(doc_id: str) -> dict:
     delete_messages(doc_id)
     reset_agent()
     return {"status": "ok", "doc_id": doc_id}
+
+
+@router.delete("/session/{doc_id}/{session_id}")
+async def delete_chat_session(doc_id: str, session_id: int) -> dict:
+    """Delete a single conversation session for a document.
+
+    Resets the agent so the deleted session's in-memory state is discarded.
+    """
+    delete_session(doc_id, session_id)
+    reset_agent()
+    return {"status": "ok", "doc_id": doc_id, "session_id": session_id}
