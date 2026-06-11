@@ -7,13 +7,20 @@ import os
 import shutil
 import sqlite3
 import tempfile
+import time
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from ..core.config import LAIDOCS_HOME
-from ..core.database import DB_PATH, init_db
+from ..core.database import (
+    DB_PATH,
+    cleanup_orphan_embeddings,
+    get_db,
+    init_db,
+    invalidate_documents_embeddings,
+)
 from ..core.vault import VAULT_DIR, SYSTEM_DIRS
 
 MANIFEST_NAME = "manifest.json"
@@ -189,6 +196,43 @@ def _extract_database(zf: zipfile.ZipFile) -> None:
             DB_PATH.write_bytes(src.read())
 
 
+def _extract_database_to_path(zf: zipfile.ZipFile, target: Path) -> bool:
+    """Extract data/laidocs.db from zip to a specific path."""
+    if "data/laidocs.db" not in zf.namelist():
+        return False
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with zf.open("data/laidocs.db") as src:
+        target.write_bytes(src.read())
+    return True
+
+
+def _backup_database(source: Path, target: Path) -> None:
+    """Copy a SQLite database using SQLite's backup API."""
+    target.parent.mkdir(parents=True, exist_ok=True)
+
+    src_conn = sqlite3.connect(str(source))
+    dst_conn = sqlite3.connect(str(target))
+    try:
+        src_conn.backup(dst_conn)
+    finally:
+        dst_conn.close()
+        src_conn.close()
+
+
+def _retry_path_action(action, *args) -> None:
+    """Retry transient Windows file operations around SQLite file handles."""
+    last_error: PermissionError | None = None
+    for _ in range(10):
+        try:
+            action(*args)
+            return
+        except PermissionError as exc:
+            last_error = exc
+            time.sleep(0.1)
+    if last_error is not None:
+        raise last_error
+
+
 def _import_replace(source: Path) -> dict[str, Any]:
     """Replace all data with backup contents."""
     with zipfile.ZipFile(str(source), "r") as zf:
@@ -196,40 +240,46 @@ def _import_replace(source: Path) -> dict[str, Any]:
 
         backup_vault = VAULT_DIR.with_name(VAULT_DIR.name + "_backup_tmp")
         backup_db = DB_PATH.with_name(DB_PATH.name + "_backup_tmp")
+        restore_db = DB_PATH.with_name(DB_PATH.name + "_restore_tmp")
 
         try:
             # Move existing
             if VAULT_DIR.exists():
-                VAULT_DIR.rename(backup_vault)
+                _retry_path_action(VAULT_DIR.rename, backup_vault)
             if DB_PATH.exists():
-                DB_PATH.rename(backup_db)
+                _backup_database(DB_PATH, backup_db)
 
             VAULT_DIR.mkdir(parents=True, exist_ok=True)
 
             # Extract everything
             _extract_vault_files(zf)
-            _extract_database(zf)
+            if _extract_database_to_path(zf, restore_db):
+                _backup_database(restore_db, DB_PATH)
 
             # Clean up backup
             if backup_vault.exists():
                 shutil.rmtree(backup_vault)
             if backup_db.exists():
-                backup_db.unlink()
+                _retry_path_action(backup_db.unlink)
+            if restore_db.exists():
+                _retry_path_action(restore_db.unlink)
         except Exception as e:
             # Rollback
             if VAULT_DIR.exists():
                 shutil.rmtree(VAULT_DIR)
-            if DB_PATH.exists():
-                DB_PATH.unlink()
 
             if backup_vault.exists():
-                backup_vault.rename(VAULT_DIR)
+                _retry_path_action(backup_vault.rename, VAULT_DIR)
             if backup_db.exists():
-                backup_db.rename(DB_PATH)
+                _backup_database(backup_db, DB_PATH)
+            if restore_db.exists():
+                _retry_path_action(restore_db.unlink)
             raise e
 
     # Reinitialize DB (apply any missing migrations)
     init_db()
+    with get_db() as conn:
+        conn.execute("DELETE FROM document_embeddings")
 
     # Ensure unsorted folder always exists
     (VAULT_DIR / "unsorted").mkdir(parents=True, exist_ok=True)
@@ -245,10 +295,10 @@ def _import_merge(source: Path) -> dict[str, Any]:
     """Merge backup data with existing data, skipping duplicate doc_ids."""
     imported_docs = 0
     skipped = 0
+    imported_doc_ids: list[str] = []
 
     # Collect existing doc_ids from local database
     existing_ids: set[str] = set()
-    from ..core.database import get_db
     try:
         with get_db() as conn:
             rows = conn.execute("SELECT id FROM documents").fetchall()
@@ -288,6 +338,7 @@ def _import_merge(source: Path) -> dict[str, Any]:
                 md_dest.write_bytes(zf.read(md_name))
 
             imported_docs += 1
+            imported_doc_ids.append(doc_id)
 
         # Copy missing asset files
         for name in zf.namelist():
@@ -310,6 +361,8 @@ def _import_merge(source: Path) -> dict[str, Any]:
 
     # Sync vault folders to DB
     _sync_vault_folders_to_db()
+    invalidate_documents_embeddings(imported_doc_ids)
+    cleanup_orphan_embeddings()
 
     return {
         "success": True,
@@ -323,8 +376,6 @@ def _import_merge(source: Path) -> dict[str, Any]:
 
 def _merge_database(backup_db_path: str, existing_ids: set[str]) -> None:
     """Merge document and chat records from backup DB for new documents only."""
-    from ..core.database import get_db
-
     backup_conn = sqlite3.connect(backup_db_path)
     backup_conn.row_factory = sqlite3.Row
 

@@ -10,6 +10,7 @@ Endpoints:
 
 from __future__ import annotations
 
+import hashlib
 import logging
 
 from fastapi import APIRouter, HTTPException
@@ -23,11 +24,13 @@ from ..services.agent import (
     set_tool_context,
     reset_agent,
     document_was_edited,
+    get_retrieved_evidence,
 )
 from ..services.chat_history import (
     get_current_session_id,
     get_messages,
     save_message,
+    save_message_evidence,
     start_new_session,
     delete_messages,
     delete_session,
@@ -64,6 +67,21 @@ def _doc_titles(doc_ids: list[str]) -> dict[str, str]:
             tuple(doc_ids),
         ).fetchall()
     return {r[0]: r[1] for r in rows}
+
+
+def _get_document_content_hash(doc_id: str) -> str:
+    """Hash current document content to isolate agent memory per document version."""
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT content FROM documents WHERE id = ?",
+            (doc_id,),
+        ).fetchone()
+
+    if not row:
+        return "missing"
+
+    content = row[0] or ""
+    return hashlib.sha256(content.encode("utf-8")).hexdigest()[:16]
 
 
 @router.post("/stream")

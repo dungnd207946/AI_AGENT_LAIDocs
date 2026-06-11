@@ -18,7 +18,83 @@ Compact support:
 from __future__ import annotations
 
 from ..core.database import get_db
+from . import retrieval
 
+from datetime import datetime, timezone
+import re
+import unicodedata
+from pathlib import Path
+
+from ..core.config import LAIDOCS_HOME
+
+DOWNLOADS_DIR = LAIDOCS_HOME / "downloads"
+
+
+def _ensure_downloads_dir() -> Path:
+    DOWNLOADS_DIR.mkdir(parents=True, exist_ok=True)
+    return DOWNLOADS_DIR
+
+
+def _sanitize_export_filename(filename: str) -> str:
+    filename = Path(filename).name
+    if filename.lower().endswith(".md"):
+        stem = filename[:-3]
+    else:
+        stem = filename
+    stem = stem.strip()
+    stem = re.sub(r"[\\/:*?\"<>|]+", "-", stem)
+    stem = re.sub(r"\s+", " ", stem).strip()
+    if not stem:
+        stem = "report"
+    return f"{stem}.md"
+
+
+def create_markdown_export(doc_id: str, filename: str | None = None, content: str | None = None) -> Path:
+    """Build a Markdown file from the latest assistant reply or provided content."""
+    if content is None:
+        messages = get_messages(doc_id)
+        if not messages:
+            raise ValueError(f"No chat history found for doc_id {doc_id}")
+
+        assistant_messages = [msg for msg in messages if msg.get("role") == "assistant"]
+        if not assistant_messages:
+            raise ValueError(f"No assistant reply found for doc_id {doc_id}")
+
+        content = assistant_messages[-1].get("content", "")
+
+    if not content:
+        raise ValueError("Cannot export empty content.")
+
+    if filename:
+        filename = _sanitize_export_filename(filename)
+    else:
+        filename = f"report-{doc_id}.md"
+
+    export_dir = _ensure_downloads_dir()
+    export_path = export_dir / filename
+    base_name = export_path.stem
+    suffix = export_path.suffix
+    counter = 1
+    while export_path.exists():
+        export_path = export_dir / f"{base_name}-{counter}{suffix}"
+        counter += 1
+
+    export_path.write_text(_build_export_content(doc_id, content), encoding="utf-8")
+    return export_path
+
+
+def _build_export_content(doc_id: str, assistant_content: str) -> str:
+    lines = [
+        f"# Chat report for document {doc_id}",
+        "",
+        f"Generated: {datetime.now(timezone.utc).isoformat()}",
+        "",
+        "## Assistant",
+        "",
+        assistant_content.rstrip(),
+        "",
+    ]
+    return "\n".join(lines)
 
 def get_current_session_id() -> int:
     """Get the current (latest) global session ID; 1 when there is none."""
@@ -32,12 +108,49 @@ def start_new_session() -> int:
     return get_current_session_id() + 1
 
 
-def save_message(session_id: int, role: str, content: str) -> None:
+def save_message(session_id: int, role: str, content: str) -> int:
     """Save a single display message (doc_id left NULL — scope is transient)."""
     with get_db() as conn:
-        conn.execute(
+        cursor = conn.execute(
             "INSERT INTO chat_messages (session_id, role, content) VALUES (?, ?, ?)",
             (session_id, role, content),
+        )
+        return int(cursor.lastrowid)
+
+
+def save_message_evidence(message_id: int, doc_id: str, evidence: list[dict]) -> None:
+    """Save retrieval-unit evidence used by an assistant message."""
+    if not message_id or not evidence:
+        return
+
+    rows = []
+    seen: set[str] = set()
+    for item in evidence:
+        unit_id = str(item.get("unit_id") or "")
+        unit_hash = str(item.get("unit_hash") or "")
+        if not unit_id or not unit_hash or unit_id in seen:
+            continue
+        seen.add(unit_id)
+        rows.append(
+            (
+                message_id,
+                doc_id,
+                unit_id,
+                unit_hash,
+                str(item.get("title") or ""),
+                str(item.get("kind") or "text"),
+            )
+        )
+
+    if not rows:
+        return
+
+    with get_db() as conn:
+        conn.executemany(
+            """INSERT OR REPLACE INTO chat_message_evidence
+               (message_id, doc_id, unit_id, unit_hash, title, kind)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            rows,
         )
 
 
