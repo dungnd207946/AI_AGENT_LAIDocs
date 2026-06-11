@@ -59,15 +59,17 @@ The chat is powered by a **LangGraph `create_react_agent`** (`backend/services/a
 - **Tools** — `retrieve_context` (hybrid retrieval via `retrieval.agentic_retrieve_context`), `reason_over_graph` (GraphRAG: explicit relation chains for multi-hop "how is X connected to Y" questions), `read_image` (VLM analysis of figures/charts embedded in the doc), `preview_edit` + `apply_edit` (edit the document, gated on user confirmation), and `create_markdown_file` (export/save document-grounded content as a downloadable `.md`)
 - **Conversation memory** — durable `AsyncSqliteSaver` checkpointer at `~/.laidocs/data/checkpoints.db`, keyed per `thread_id = "doc-{doc_id}-s{session_id}"`; survives backend restarts
 - **Conversation compaction** — `backend/services/compactor.py` keeps token usage bounded: `compact_if_needed` (called before each stream in `chat.py`) rolls older display history into an LLM summary once it exceeds a token threshold, keeping the last few Q&A pairs verbatim
-- **Retrieved-evidence tracking** — each turn's retrieved units are saved per message (`save_message_evidence`); the agent reads them back via `get_retrieved_evidence`, and stale/unverified prior evidence is flagged so it is never reused as a document fact
+- **Retrieved-evidence tracking** — each turn's retrieved units are saved per message (`save_message_evidence`); the agent reads them back via `get_retrieved_evidence`, and stale/unverified prior evidence is flagged so it is never reused as a document fact. `evidence_from_units` also carries `heading_path` + a one-line `preview` so the UI can render citations and jump-to-source.
+- **Demo UI** — the chat panel surfaces the retrieval/graph work for demos (see `src/components/CitationChips.tsx`, `ReasoningChain.tsx`, `CompareDrawer.tsx`): (1) **citations + grounding badge** under each answer, click a chip to scroll the document preview to that section (`DocumentEditor.handleJumpToSource`); (2) **reasoning-path** chips when `reason_over_graph` ran; (3) a **Demo-mode toggle** (chat header, `localStorage` key `laidocs-demo-mode`) that reveals a **Compare RAG vs GraphRAG** button. The stream emits `[EVIDENCE]` and `[CHAIN]` SSE events; chains persist in the `chat_message_chains` table and are replayed on history reload via `chat_history.get_display_messages`.
 - **User preferences** — `~/.laidocs/memories/preferences.md` is read at agent build time and injected into the system prompt (read-only seeding; there is no live write-back store)
 - **Display history** — separate `chat_messages` SQLite table (survives session reset)
 - **Session management** — per-(doc, session) threads; the ChatPanel UI shows one session at a time with a switcher dropdown to resume any past session
 - **Agent singleton** — created lazily on first request; call `reset_agent()` after settings change so the next request rebuilds with new LLM config. The checkpointer persists across resets and is closed on app shutdown via `close_checkpointer()`.
 
 API endpoints in `backend/api/chat.py`:
-- `POST /api/chat/stream` — SSE stream with `session_id` support
-- `GET /api/chat/history/{doc_id}` — load all display messages
+- `POST /api/chat/stream` — SSE stream with `session_id` support (also emits `[EVIDENCE]` / `[CHAIN]` / `[EDITED]` sentinels before `[DONE]`)
+- `POST /api/chat/compare` — stateless RAG-vs-GraphRAG A/B: deep-copies settings, toggles `graph_rag.enabled` off then on (same model + grounded prompt), returns both answers + ranked units + `bridge_unit_ids` (units only the graph walk recovered). Powers the Demo-mode compare drawer.
+- `GET /api/chat/history/{doc_id}` — load all display messages (assistant rows carry their `evidence` + `chain`)
 - `POST /api/chat/new-session/{doc_id}` — start fresh session
 - `DELETE /api/chat/history/{doc_id}` — clear all history
 - `DELETE /api/chat/session/{doc_id}/{session_id}` — delete a single session
@@ -126,7 +128,7 @@ The UI surface is `src/components/DataTab.tsx`. Export uses the Tauri save-file 
 | `~/.laidocs/vault/<folder>/<doc>.md` | Converted Markdown documents |
 | `~/.laidocs/vault/<folder>/<doc>.md.meta.json` | Document metadata sidecar |
 | `~/.laidocs/vault/assets/<doc_id>_N.png` | Extracted images |
-| `~/.laidocs/data/laidocs.db` | SQLite database (metadata, tree index, chat history, embedding cache, knowledge-graph triple cache) |
+| `~/.laidocs/data/laidocs.db` | SQLite database (metadata, tree index, chat history, per-message citation evidence + reasoning chains, embedding cache, knowledge-graph triple cache) |
 | `~/.laidocs/data/checkpoints.db` | Durable conversation memory — `AsyncSqliteSaver` checkpointer, one thread per `doc+session`; survives restarts |
 | `~/.laidocs/memories/preferences.md` | Initial agent-learned user preferences |
 
@@ -136,7 +138,8 @@ The UI surface is `src/components/DataTab.tsx`. Export uses the Tauri save-file 
 src/                    # React frontend
 ├── pages/              # Documents, DocumentEditor, Settings, WelcomePanel
 ├── components/         # Sidebar, ChatPanel, UploadDialog, CrawlDialog,
-│                       #   MarkdownPreview, DataTab (export/import), TopBar, FileTree
+│                       #   MarkdownPreview, DataTab (export/import), TopBar, FileTree,
+│                       #   CitationChips, ReasoningChain, CompareDrawer (demo UI)
 ├── context/            # FolderContext, UploadContext (React state)
 ├── hooks/              # useSidecar (Tauri invoke wrappers)
 └── lib/                # sidecar.ts (HTTP helpers, SSE, health polling, chat history API)
@@ -165,8 +168,8 @@ telemetry_server/       # Standalone telemetry collection server (optional)
 ## Frontend ↔ Backend Protocol
 
 - REST API at `http://localhost:8008` — see `src/lib/sidecar.ts` for `apiGet`/`apiPost`/`apiPut`/`apiDelete` helpers.
-- SSE streaming for chat (`POST /api/chat/stream`) and upload progress stages.
-- Chat history API: `getChatHistory`, `startNewSession`, `clearChatHistory` in `sidecar.ts`.
+- SSE streaming for chat (`POST /api/chat/stream`) and upload progress stages. `streamChat` takes a handlers object `{ onChunk, onEdited, onEvidence, onChain }`; the stream's `[EVIDENCE] {json}` / `[CHAIN] {json}` sentinels carry citation + reasoning-chain payloads.
+- Chat history API: `getChatHistory`, `startNewSession`, `clearChatHistory`, `compareRetrieval` in `sidecar.ts`.
 - Assets served at `/assets/<filename>` via FastAPI `StaticFiles` mount.
 
 ## Gotchas
