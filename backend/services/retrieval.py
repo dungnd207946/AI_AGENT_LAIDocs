@@ -15,11 +15,14 @@ and all LLM calls go through the provider-agnostic factory in ``llm.py``.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
 
-from ..core.config import Settings, get_settings
+import httpx
+
+from ..core.config import RerankerConfig, Settings, get_settings
 from ..core.database import get_db
 from .llm import (
     create_chat_model,
@@ -43,7 +46,7 @@ _CHUNK_TARGET_CHARS = 1000  # chunk size when a document has no heading tree
 _NODE_SELECT_PROMPT = """\
 Given this document's tree structure, identify which sections are most \
 relevant to answer the user's question. Return ONLY a JSON array of \
-node_ids, ordered by relevance. Select 1-5 nodes maximum.
+node_ids, ordered by relevance. Select 1-{max_nodes} nodes maximum.
 
 Document Structure:
 {structure}
@@ -81,12 +84,38 @@ def get_document_content(doc_id: str) -> str | None:
     return row[0] if row and row[0] else None
 
 
+def _get_document_state(doc_id: str) -> tuple[str | None, dict | None]:
+    """Load current document content + tree JSON in one DB round-trip."""
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT content, tree_index FROM documents WHERE id=?",
+            (doc_id,),
+        ).fetchone()
+    if not row:
+        return None, None
+
+    content = row["content"] if row["content"] else None
+    tree = None
+    if row["tree_index"]:
+        try:
+            tree = json.loads(row["tree_index"])
+        except (json.JSONDecodeError, TypeError):
+            tree = None
+    return content, tree
+
+
 # ---------------------------------------------------------------------------
 # Node selection — tree reasoning (step 1 of the tree retriever)
 # ---------------------------------------------------------------------------
 
 
-def select_node_ids(tree_index: dict, question: str, settings: Settings) -> list[str]:
+def select_node_ids(
+    tree_index: dict,
+    question: str,
+    settings: Settings,
+    *,
+    max_nodes: int = 5,
+) -> list[str]:
     """Ask the LLM which node_ids are relevant to the question.
 
     Synchronous on purpose: it is called from inside the LangChain ``@tool``
@@ -102,6 +131,7 @@ def select_node_ids(tree_index: dict, question: str, settings: Settings) -> list
     prompt = _NODE_SELECT_PROMPT.format(
         structure=json.dumps(structure_no_text, ensure_ascii=False, indent=2),
         question=question,
+        max_nodes=max(1, max_nodes),
     )
 
     model = create_chat_model(cfg, temperature=0, max_tokens=200)
@@ -156,9 +186,17 @@ def get_retrieval_units(doc_id: str) -> list[dict]:
     they never collide with tree node ids or chunk ids.
     """
     content = get_document_content(doc_id)
-
-    base: list[dict] = []
     tree = get_tree_index(doc_id)
+    return _build_retrieval_units(doc_id, content, tree)
+
+
+def _build_retrieval_units(
+    doc_id: str,
+    content: str | None,
+    tree: dict | None,
+) -> list[dict]:
+    """Build the shared retrieval corpus from current document state."""
+    base: list[dict] = []
     if tree and tree.get("structure"):
         nodes = structure_to_list(tree["structure"])
         base = [
@@ -167,6 +205,8 @@ def get_retrieval_units(doc_id: str) -> list[dict]:
                 "title": n.get("title", "Untitled"),
                 "text": n.get("text", ""),
                 "kind": "text",
+                "heading_path": n.get("heading_path") or [],
+                "path": n.get("path") or "",
             }
             for n in nodes
             if n.get("node_id") is not None and n.get("text")
@@ -174,7 +214,14 @@ def get_retrieval_units(doc_id: str) -> list[dict]:
 
     if not base and content:
         base = [
-            {"unit_id": f"c{i + 1:04d}", "title": "", "text": chunk, "kind": "text"}
+            {
+                "unit_id": f"c{i + 1:04d}",
+                "title": "",
+                "text": chunk,
+                "kind": "text",
+                "heading_path": [],
+                "path": "",
+            }
             for i, chunk in enumerate(_chunk_text(content))
         ]
 
@@ -184,6 +231,85 @@ def get_retrieval_units(doc_id: str) -> list[dict]:
     if content:
         base.extend(get_multimodal_units(doc_id, content=content))
     return base
+
+
+def _normalize_hash_value(value: object) -> object:
+    if value is None:
+        return ""
+    if isinstance(value, list):
+        return ["" if item is None else str(item) for item in value]
+    return str(value)
+
+
+def _compute_content_hash(content: str | None) -> str:
+    payload = content if content is not None else ""
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _compute_corpus_hash(
+    doc_id: str,
+    content: str | None,
+    units: list[dict],
+    *,
+    version: int = 1,
+) -> str:
+    canonical_units = []
+    for unit in sorted(units, key=lambda item: str(item.get("unit_id") or "")):
+        canonical_units.append(
+            {
+                "unit_id": _normalize_hash_value(unit.get("unit_id")),
+                "kind": _normalize_hash_value(unit.get("kind")),
+                "title": _normalize_hash_value(unit.get("title")),
+                "heading_path": _normalize_hash_value(unit.get("heading_path") or []),
+                "path": _normalize_hash_value(unit.get("path")),
+                "text": _normalize_hash_value(unit.get("text")),
+            }
+        )
+
+    payload = {
+        "version": version,
+        "doc_id": doc_id,
+        "content_hash": _compute_content_hash(content),
+        "units": canonical_units,
+    }
+    canonical_json = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(canonical_json.encode("utf-8")).hexdigest()
+
+
+def _compute_unit_hash(unit: dict) -> str:
+    """Hash one retrieval unit so unchanged chunks can reuse embeddings."""
+    payload = {
+        "version": 1,
+        "unit_id": _normalize_hash_value(unit.get("unit_id")),
+        "kind": _normalize_hash_value(unit.get("kind")),
+        "title": _normalize_hash_value(unit.get("title")),
+        "heading_path": _normalize_hash_value(unit.get("heading_path") or []),
+        "path": _normalize_hash_value(unit.get("path")),
+        "text": _normalize_hash_value(unit.get("text")),
+    }
+    canonical_json = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(canonical_json.encode("utf-8")).hexdigest()
+
+
+def _unit_embedding_text(unit: dict) -> str:
+    return f"{unit.get('title') or ''}\n{unit.get('text') or ''}".strip()[:8000]
+
+
+def _get_current_corpus(doc_id: str) -> tuple[str | None, list[dict], str]:
+    """Load current document state, retrieval units, and canonical corpus hash."""
+    content, tree = _get_document_state(doc_id)
+    units = _build_retrieval_units(doc_id, content, tree)
+    return content, units, _compute_corpus_hash(doc_id, content, units)
 
 
 def build_context_from_units(units: list[dict]) -> str:
@@ -209,6 +335,37 @@ def build_context_from_units(units: list[dict]) -> str:
             break
         ctx += section
     return ctx.strip()
+
+
+def evidence_from_units(units: list[dict]) -> list[dict]:
+    """Return stable evidence metadata for retrieved units."""
+    evidence: list[dict] = []
+    seen: set[str] = set()
+    for unit in units:
+        unit_id = str(unit.get("unit_id") or "")
+        if not unit_id or unit_id in seen:
+            continue
+        seen.add(unit_id)
+        evidence.append(
+            {
+                "unit_id": unit_id,
+                "unit_hash": _compute_unit_hash(unit),
+                "title": unit.get("title") or "",
+                "kind": unit.get("kind") or "text",
+            }
+        )
+    return evidence
+
+
+def get_current_unit_hashes(doc_id: str) -> dict[str, str]:
+    """Map current retrieval unit ids to their content hashes."""
+    content, tree = _get_document_state(doc_id)
+    units = _build_retrieval_units(doc_id, content, tree)
+    return {
+        str(unit.get("unit_id") or ""): _compute_unit_hash(unit)
+        for unit in units
+        if str(unit.get("unit_id") or "")
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -301,6 +458,8 @@ def _extract_image_units(content: str) -> list[dict]:
             "title": title[:200],
             "text": text,
             "kind": "image",
+            "heading_path": [],
+            "path": "",
         })
     return units
 
@@ -340,6 +499,8 @@ def _extract_table_units(content: str) -> list[dict]:
                 "title": title[:200],
                 "text": text,
                 "kind": "table",
+                "heading_path": [],
+                "path": "",
             })
             i = j
         else:
@@ -403,11 +564,13 @@ def bm25_search(doc_id: str, question: str, units: list[dict] | None = None,
 
 def ensure_embedding_index(doc_id: str, settings: Settings,
                            units: list[dict] | None = None) -> bool:
-    """Build & persist the dense index for a doc if missing. Idempotent.
+    """Build & persist missing/stale dense vectors for a doc. Idempotent.
 
     Embeddings are computed lazily on first retrieval (no ingest-time hook),
-    so this is safe to call on every query. Returns False when embeddings are
-    unsupported/unconfigured or the document has no content.
+    so this is safe to call on every query. Cache validity is per retrieval
+    unit, not per whole document: editing one chunk only re-embeds that chunk.
+    Returns False when embeddings are unsupported/unconfigured or the document
+    has no content.
     """
     cfg = settings.active_llm
     if not embeddings_supported(cfg):
@@ -416,35 +579,107 @@ def ensure_embedding_index(doc_id: str, settings: Settings,
     if not model:
         return False
 
-    with get_db() as conn:
-        row = conn.execute(
-            "SELECT COUNT(*) FROM document_embeddings WHERE doc_id=? AND model=?",
-            (doc_id, model),
-        ).fetchone()
-    if row and row[0]:
-        return True  # already indexed with this model
-
-    units = units if units is not None else get_retrieval_units(doc_id)
-    if not units:
+    _content_v1, units_v1, corpus_hash_v1 = _get_current_corpus(doc_id)
+    if units is not None:
+        units_v1 = units
+        corpus_hash_v1 = _compute_corpus_hash(doc_id, _content_v1, units_v1)
+    if not units_v1:
         return False
+
+    current_units_by_id = {
+        str(u.get("unit_id") or ""): u
+        for u in units_v1
+        if str(u.get("unit_id") or "")
+    }
+    current_unit_hashes = {
+        unit_id: _compute_unit_hash(unit)
+        for unit_id, unit in current_units_by_id.items()
+    }
+    with get_db() as conn:
+        rows = conn.execute(
+            """SELECT unit_id, unit_hash
+               FROM document_embeddings
+               WHERE doc_id=? AND model=?""",
+            (doc_id, model),
+        ).fetchall()
+
+    cached_hashes = {str(row["unit_id"]): row["unit_hash"] or "" for row in rows}
+    missing_unit_ids = [
+        unit_id
+        for unit_id, unit_hash in current_unit_hashes.items()
+        if cached_hashes.get(unit_id) != unit_hash
+    ]
+
+    stale_unit_ids = [
+        unit_id
+        for unit_id in cached_hashes
+        if unit_id not in current_unit_hashes
+        or cached_hashes.get(unit_id) != current_unit_hashes.get(unit_id)
+    ]
+
+    if not missing_unit_ids:
+        if stale_unit_ids:
+            with get_db() as conn:
+                conn.executemany(
+                    "DELETE FROM document_embeddings WHERE doc_id=? AND model=? AND unit_id=?",
+                    [(doc_id, model, unit_id) for unit_id in stale_unit_ids],
+                )
+        return True
 
     import numpy as np
 
     embedder = create_embeddings(cfg)
-    texts = [f"{u['title']}\n{u['text']}".strip()[:8000] for u in units]
+    units_to_embed = [current_units_by_id[unit_id] for unit_id in missing_unit_ids]
+    texts = [_unit_embedding_text(unit) for unit in units_to_embed]
     vectors = embedder.embed_documents(texts)
 
+    _content_v2, units_v2, corpus_hash_v2 = _get_current_corpus(doc_id)
+    units_by_id_v2 = {
+        str(u.get("unit_id") or ""): u
+        for u in units_v2
+        if str(u.get("unit_id") or "")
+    }
+    unit_hashes_v2 = {
+        unit_id: _compute_unit_hash(unit)
+        for unit_id, unit in units_by_id_v2.items()
+    }
+    if any(unit_hashes_v2.get(unit_id) != current_unit_hashes.get(unit_id) for unit_id in missing_unit_ids):
+        logger.info("Skipping stale embedding write for doc %s after corpus change", doc_id)
+        return False
+    if len(vectors) != len(units_to_embed):
+        logger.warning(
+            "Embedding vector count mismatch for doc %s: %s vectors for %s units",
+            doc_id,
+            len(vectors),
+            len(units_to_embed),
+        )
+        return False
+
     with get_db() as conn:
-        # Clear any stale rows (e.g. from a previous embedding model) first.
-        conn.execute("DELETE FROM document_embeddings WHERE doc_id=?", (doc_id,))
-        for u, vec in zip(units, vectors):
+        conn.execute("BEGIN")
+        if stale_unit_ids:
+            conn.executemany(
+                "DELETE FROM document_embeddings WHERE doc_id=? AND model=? AND unit_id=?",
+                [(doc_id, model, unit_id) for unit_id in stale_unit_ids],
+            )
+        for u, vec in zip(units_to_embed, vectors):
+            unit_id = str(u.get("unit_id") or "")
             arr = np.asarray(vec, dtype=np.float32)
             conn.execute(
                 """INSERT OR REPLACE INTO document_embeddings
-                   (doc_id, unit_id, title, chunk, model, dim, vector)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                (doc_id, u["unit_id"], u["title"], u["text"], model,
-                 int(arr.shape[0]), arr.tobytes()),
+                   (doc_id, unit_id, title, chunk, model, corpus_hash, unit_hash, dim, vector)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    doc_id,
+                    unit_id,
+                    u.get("title") or "",
+                    u.get("text") or "",
+                    model,
+                    corpus_hash_v2,
+                    unit_hashes_v2[unit_id],
+                    int(arr.shape[0]),
+                    arr.tobytes(),
+                ),
             )
     return True
 
@@ -454,7 +689,17 @@ def dense_search(doc_id: str, question: str, settings: Settings,
                  top_k: int = _PER_RETRIEVER_TOP_K) -> list[str]:
     """Rank units by embedding cosine similarity; return ordered unit_ids."""
     cfg = settings.active_llm
-    if not ensure_embedding_index(doc_id, settings, units=units):
+    model = embed_model_name(cfg)
+    if not model:
+        return []
+
+    content, current_units, _corpus_hash = _get_current_corpus(doc_id)
+    if units is not None:
+        current_units = units
+    if not current_units:
+        return []
+
+    if not ensure_embedding_index(doc_id, settings, units=current_units):
         return []
 
     import numpy as np
@@ -462,17 +707,26 @@ def dense_search(doc_id: str, question: str, settings: Settings,
     embedder = create_embeddings(cfg)
     q = np.asarray(embedder.embed_query(question), dtype=np.float32)
     qn = q / (np.linalg.norm(q) + 1e-8)
+    current_unit_hashes = {
+        str(unit.get("unit_id") or ""): _compute_unit_hash(unit)
+        for unit in current_units
+        if str(unit.get("unit_id") or "")
+    }
 
     with get_db() as conn:
         rows = conn.execute(
-            "SELECT unit_id, vector FROM document_embeddings WHERE doc_id=?",
-            (doc_id,),
+            """SELECT unit_id, unit_hash, vector
+               FROM document_embeddings
+               WHERE doc_id=? AND model=?""",
+            (doc_id, model),
         ).fetchall()
     if not rows:
         return []
 
     scored: list[tuple[str, float]] = []
-    for unit_id, blob in rows:
+    for unit_id, unit_hash, blob in rows:
+        if current_unit_hashes.get(str(unit_id)) != (unit_hash or ""):
+            continue
         v = np.frombuffer(blob, dtype=np.float32)
         if v.shape != qn.shape:
             continue  # dimension mismatch (stale model) — skip
@@ -481,6 +735,72 @@ def dense_search(doc_id: str, question: str, settings: Settings,
 
     scored.sort(key=lambda x: x[1], reverse=True)
     return [uid for uid, _ in scored[:top_k]]
+
+
+# ---------------------------------------------------------------------------
+# Cross-encoder reranking
+# ---------------------------------------------------------------------------
+
+
+def is_reranker_configured(cfg: RerankerConfig) -> bool:
+    return bool(cfg.enabled and cfg.base_url and cfg.model)
+
+
+def _build_reranker_document(unit: dict) -> str:
+    heading_path = unit.get("heading_path") or []
+    if not isinstance(heading_path, list):
+        heading_path = [str(heading_path)]
+    heading_text = " > ".join(str(item).strip() for item in heading_path if str(item).strip())
+    path = str(unit.get("path") or "").strip()
+    parts = [
+        f"kind: {unit.get('kind') or 'text'}",
+        f"title: {unit.get('title') or ''}",
+        f"heading_path: {heading_text}",
+        f"path: {path}",
+        f"text:\n{unit.get('text') or ''}",
+    ]
+    return "\n".join(parts).strip()[:4000]
+
+
+def rerank_units(question: str, candidate_units: list[dict], settings: Settings) -> list[str]:
+    cfg = settings.active_reranker
+    if not is_reranker_configured(cfg) or not candidate_units:
+        return []
+
+    payload = {
+        "model": cfg.model,
+        "query": question,
+        "documents": [_build_reranker_document(unit) for unit in candidate_units],
+        "top_n": min(max(1, cfg.top_n), len(candidate_units)),
+    }
+    headers = {"Content-Type": "application/json"}
+    if cfg.api_key:
+        headers["Authorization"] = f"Bearer {cfg.api_key}"
+
+    timeout = httpx.Timeout(cfg.timeout_s)
+    with httpx.Client(timeout=timeout) as client:
+        response = client.post(cfg.base_url, json=payload, headers=headers)
+        response.raise_for_status()
+        data = response.json()
+
+    if not isinstance(data, dict) or not isinstance(data.get("results"), list):
+        raise ValueError("Invalid reranker response: missing results")
+
+    ranked: list[tuple[int, float]] = []
+    for item in data["results"]:
+        if not isinstance(item, dict):
+            continue
+        idx = item.get("index")
+        score = item.get("relevance_score", 0)
+        if not isinstance(idx, int) or idx < 0 or idx >= len(candidate_units):
+            continue
+        try:
+            ranked.append((idx, float(score)))
+        except (TypeError, ValueError):
+            continue
+
+    ranked.sort(key=lambda item: item[1], reverse=True)
+    return [str(candidate_units[idx]["unit_id"]) for idx, _ in ranked]
 
 
 # ---------------------------------------------------------------------------
@@ -522,27 +842,39 @@ def hybrid_rank(
     if not units:
         return [], None
 
+    reranker_cfg = settings.active_reranker
+    reranker_active = is_reranker_configured(reranker_cfg)
+    retriever_top_k = (
+        max(_FUSED_TOP_K, reranker_cfg.candidate_k)
+        if reranker_active
+        else _FUSED_TOP_K
+    )
     ranked_lists: list[list[str]] = []
 
     tree = tree if tree is not None else get_tree_index(doc_id)
     tree_selected: list[str] | None = None
     if tree and tree.get("structure"):
         try:
-            tree_selected = select_node_ids(tree, question, settings)
+            tree_selected = select_node_ids(
+                tree,
+                question,
+                settings,
+                max_nodes=retriever_top_k,
+            )
             if tree_selected:
                 ranked_lists.append(tree_selected)
         except Exception:
             logger.exception("Tree node selection failed for doc %s", doc_id)
 
     try:
-        bm = bm25_search(doc_id, question, units=units)
+        bm = bm25_search(doc_id, question, units=units, top_k=retriever_top_k)
         if bm:
             ranked_lists.append(bm)
     except Exception:
         logger.exception("BM25 retrieval failed for doc %s", doc_id)
 
     try:
-        dense = dense_search(doc_id, question, settings, units=units)
+        dense = dense_search(doc_id, question, settings, units=units, top_k=retriever_top_k)
         if dense:
             ranked_lists.append(dense)
     except Exception:
@@ -550,7 +882,24 @@ def hybrid_rank(
 
     if not ranked_lists:
         return [], tree_selected
-    return rrf_fuse(ranked_lists), tree_selected
+
+    fused = rrf_fuse(ranked_lists, top_k=retriever_top_k)
+    if not reranker_active or not fused:
+        return fused[:_FUSED_TOP_K], tree_selected
+
+    unit_map = {str(unit["unit_id"]): unit for unit in units if unit.get("unit_id") is not None}
+    candidate_units = [unit_map[uid] for uid in fused if uid in unit_map][:retriever_top_k]
+    if not candidate_units:
+        return fused[:_FUSED_TOP_K], tree_selected
+
+    try:
+        reranked = rerank_units(question, candidate_units, settings)
+        if reranked:
+            final_top_k = min(_FUSED_TOP_K, max(1, reranker_cfg.top_n))
+            return reranked[:final_top_k], tree_selected
+    except Exception:
+        logger.exception("Cross-encoder reranking failed for doc %s", doc_id)
+    return fused[:_FUSED_TOP_K], tree_selected
 
 
 # ---------------------------------------------------------------------------
@@ -558,22 +907,21 @@ def hybrid_rank(
 # ---------------------------------------------------------------------------
 
 
-def retrieve_context(doc_id: str, question: str, settings: Settings | None = None) -> str:
-    """Single-shot hybrid retrieval → context string for the given question.
-
-    Fuses tree reasoning + BM25 + dense embeddings via RRF. Degrades
-    gracefully: any unavailable retriever is dropped; if nothing is available,
-    falls back to truncated raw content. Used as the agentic loop's fallback.
-    """
+def retrieve_context_with_evidence(
+    doc_id: str,
+    question: str,
+    settings: Settings | None = None,
+) -> tuple[str, list[dict]]:
+    """Single-shot hybrid retrieval with evidence metadata."""
     settings = settings or get_settings()
 
     if not is_llm_configured(settings.active_llm):
         content = get_document_content(doc_id)
-        return content[:MAX_CONTEXT_CHARS] if content else ""
+        return (content[:MAX_CONTEXT_CHARS] if content else ""), []
 
     units = get_retrieval_units(doc_id)
     if not units:
-        return ""
+        return "", []
     unit_map = {u["unit_id"]: u for u in units}
 
     fused, tree_selected = hybrid_rank(doc_id, question, settings, units=units)
@@ -583,12 +931,23 @@ def retrieve_context(doc_id: str, question: str, settings: Settings | None = Non
     # anti-hallucination behaviour from the pure tree-reasoning pipeline).
     if not fused:
         if tree_selected == []:
-            return ""
+            return "", []
         content = get_document_content(doc_id)
-        return content[:MAX_CONTEXT_CHARS] if content else ""
+        return (content[:MAX_CONTEXT_CHARS] if content else ""), []
 
     selected = [unit_map[uid] for uid in fused if uid in unit_map]
-    return build_context_from_units(selected)
+    return build_context_from_units(selected), evidence_from_units(selected)
+
+
+def retrieve_context(doc_id: str, question: str, settings: Settings | None = None) -> str:
+    """Single-shot hybrid retrieval → context string for the given question.
+
+    Fuses tree reasoning + BM25 + dense embeddings via RRF. Degrades
+    gracefully: any unavailable retriever is dropped; if nothing is available,
+    falls back to truncated raw content. Used as the agentic loop's fallback.
+    """
+    context, _evidence = retrieve_context_with_evidence(doc_id, question, settings)
+    return context
 
 
 # ---------------------------------------------------------------------------
@@ -655,13 +1014,13 @@ def _critique(question: str, context: str, settings: Settings) -> dict:
         return {"sufficient": True, "followups": []}
 
 
-def agentic_retrieve_context(
+def agentic_retrieve_context_with_evidence(
     doc_id: str,
     question: str,
     settings: Settings | None = None,
     max_rounds: int = MAX_RETRIEVAL_ROUNDS,
-) -> str:
-    """Iterative multi-hop retrieval with self-critique.
+) -> tuple[str, list[dict]]:
+    """Iterative multi-hop retrieval with self-critique and evidence metadata.
 
     Round 1 retrieves for the original question. After each round the LLM
     critiques the accumulated evidence; if insufficient, its follow-up
@@ -676,11 +1035,11 @@ def agentic_retrieve_context(
     settings = settings or get_settings()
 
     if not is_llm_configured(settings.active_llm):
-        return retrieve_context(doc_id, question, settings)
+        return retrieve_context_with_evidence(doc_id, question, settings)
 
     units = get_retrieval_units(doc_id)
     if not units:
-        return ""
+        return "", []
     unit_map = {u["unit_id"]: u for u in units}
     tree = get_tree_index(doc_id)
 
@@ -716,7 +1075,7 @@ def agentic_retrieve_context(
         # Out-of-scope: first round produced only an empty tree selection and
         # nothing else — honour the anti-hallucination contract.
         if not accumulated and first_round_empty_tree_only:
-            return ""
+            return "", []
         if not accumulated:
             break
 
@@ -740,8 +1099,24 @@ def agentic_retrieve_context(
     if not accumulated:
         # Nothing from any retriever — fall back to raw content.
         content = get_document_content(doc_id)
-        return content[:MAX_CONTEXT_CHARS] if content else ""
+        return (content[:MAX_CONTEXT_CHARS] if content else ""), []
 
     ordered = sorted(accumulated.items(), key=lambda x: x[1], reverse=True)
     selected = [unit_map[uid] for uid, _ in ordered[:MAX_ACCUMULATED_UNITS]]
-    return build_context_from_units(selected)
+    return build_context_from_units(selected), evidence_from_units(selected)
+
+
+def agentic_retrieve_context(
+    doc_id: str,
+    question: str,
+    settings: Settings | None = None,
+    max_rounds: int = MAX_RETRIEVAL_ROUNDS,
+) -> str:
+    """Iterative multi-hop retrieval with self-critique."""
+    context, _evidence = agentic_retrieve_context_with_evidence(
+        doc_id,
+        question,
+        settings,
+        max_rounds=max_rounds,
+    )
+    return context

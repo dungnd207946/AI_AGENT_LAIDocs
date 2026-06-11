@@ -75,6 +75,19 @@ MUST be `retrieve_context`. Never answer from memory alone.
 is `retrieve_context`. NEVER tell the user "no document exists" based on a file listing. \
 If you feel the urge to "look for the file", call `retrieve_context` instead.
 
+## Evidence Priority
+- For any factual answer about the document, the current turn's `retrieve_context` \
+output is the only authoritative source.
+- Conversation/session history is only for understanding the user's intent, follow-up \
+references, and wording. Do NOT treat previous assistant answers as evidence about \
+the current document.
+- If conversation history conflicts with the latest retrieved context, ignore the \
+conversation history and trust the retrieved context.
+- If `retrieve_context` does not contain the answer, say that the current document \
+context does not show it. Do NOT answer document facts from prior assistant messages.
+- If the document may have been edited, treat previous answers as stale until they are \
+confirmed by the latest `retrieve_context` output.
+
 ## Reading Images
 - The document may contain images referenced in context as `![Image N](/assets/...)`.
 - When the user's question concerns such an image, call `read_image` with the EXACT path \
@@ -218,7 +231,14 @@ def retrieve_context(question: str) -> str:
     if not doc_id or not settings:
         return "Error: Document context not configured."
 
-    context = retrieval.agentic_retrieve_context(doc_id, question, settings)
+    context, evidence = retrieval.agentic_retrieve_context_with_evidence(doc_id, question, settings)
+    if evidence:
+        existing = ctx.setdefault("retrieved_units", [])
+        seen = {item.get("unit_id") for item in existing if isinstance(item, dict)}
+        for item in evidence:
+            if item.get("unit_id") not in seen:
+                existing.append(item)
+                seen.add(item.get("unit_id"))
     if context:
         return context
     return "No relevant sections found in the document for this question."
@@ -449,7 +469,14 @@ def document_was_edited() -> bool:
     return bool(_tool_context_var.get().get("edited", False))
 
 
+def get_retrieved_evidence() -> list[dict]:
+    """Return retrieval-unit evidence collected during the current request."""
+    evidence = _tool_context_var.get().get("retrieved_units", [])
+    return evidence if isinstance(evidence, list) else []
+
+
 def reset_agent() -> None:
-    """Reset the agent singleton (call after settings change)."""
-    global _agent
+    """Reset the agent singleton and active checkpoint handle."""
+    global _agent, _checkpointer
     _agent = None
+    _checkpointer = None
