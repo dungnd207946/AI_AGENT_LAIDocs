@@ -50,7 +50,7 @@ export async function apiDelete<T>(path: string): Promise<T> {
 // ── Streaming chat (SSE) ──────────────────────────────────────────
 
 export async function streamChat(
-  docId: string,
+  docIds: string[],
   question: string,
   onChunk: (text: string) => void,
   sessionId?: number,
@@ -59,7 +59,7 @@ export async function streamChat(
   const res = await fetch(`${API_BASE}/api/chat/stream`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ doc_id: docId, question, session_id: sessionId ?? null }),
+    body: JSON.stringify({ doc_ids: docIds, question, session_id: sessionId ?? null }),
   });
 
   if (!res.ok || !res.body) {
@@ -100,7 +100,20 @@ export async function streamChat(
   }
 }
 
-// ── Chat history & session management ─────────────────────────────
+// ── Document list (for the chat scope picker) ─────────────────────
+
+export interface DocSummary {
+  id: string;
+  title?: string;
+  filename: string;
+  folder: string;
+}
+
+export async function listDocuments(): Promise<DocSummary[]> {
+  return apiGet<DocSummary[]>(`/api/documents/`);
+}
+
+// ── Chat history & session management (global sessions) ───────────
 
 export interface ChatMessage {
   id: number;
@@ -110,22 +123,22 @@ export interface ChatMessage {
   created_at: string;
 }
 
-export async function getChatHistory(docId: string): Promise<ChatMessage[]> {
-  const res = await apiGet<{ messages: ChatMessage[] }>(`/api/chat/history/${docId}`);
+export async function getChatHistory(): Promise<ChatMessage[]> {
+  const res = await apiGet<{ messages: ChatMessage[] }>(`/api/chat/history`);
   return res.messages;
 }
 
-export async function startNewSession(docId: string): Promise<number> {
-  const res = await apiPost<{ session_id: number }>(`/api/chat/new-session/${docId}`, {});
+export async function startNewSession(): Promise<number> {
+  const res = await apiPost<{ session_id: number }>(`/api/chat/new-session`, {});
   return res.session_id;
 }
 
-export async function clearChatHistory(docId: string): Promise<void> {
-  await apiDelete(`/api/chat/history/${docId}`);
+export async function clearChatHistory(): Promise<void> {
+  await apiDelete(`/api/chat/history`);
 }
 
-export async function deleteSession(docId: string, sessionId: number): Promise<void> {
-  await apiDelete(`/api/chat/session/${docId}/${sessionId}`);
+export async function deleteSession(sessionId: number): Promise<void> {
+  await apiDelete(`/api/chat/session/${sessionId}`);
 }
 
 // ── Sidecar health check ──────────────────────────────────────────

@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect, useCallback, useMemo } from "react";
-import { streamChat, getChatHistory, startNewSession, clearChatHistory, deleteSession } from "../lib/sidecar";
+import { streamChat, getChatHistory, startNewSession, clearChatHistory, deleteSession, listDocuments, DocSummary } from "../lib/sidecar";
 import MarkdownPreview from "./MarkdownPreview";
 
 interface Message {
@@ -114,21 +114,36 @@ function MessageBubble({ message }: { message: Message }) {
 }
 
 interface ChatPanelProps {
-  docId: string;
+  initialDocId: string;            // file the chat was opened from (seeds scope)
   onClose: () => void;
   onDocumentEdited?: () => void;
 }
 
-export default function ChatPanel({ docId, onClose, onDocumentEdited }: ChatPanelProps) {
+export default function ChatPanel({ initialDocId, onClose, onDocumentEdited }: ChatPanelProps) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [streaming, setStreaming] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [sessionId, setSessionId] = useState<number>(1);
   const [sessionMenuOpen, setSessionMenuOpen] = useState(false);
+
+  // Scope: which documents this turn may read/edit. Transient (not persisted).
+  const [scopeDocIds, setScopeDocIds] = useState<string[]>([initialDocId]);
+  const [allDocs, setAllDocs] = useState<DocSummary[]>([]);
+  const [scopeMenuOpen, setScopeMenuOpen] = useState(false);
+
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const sessionMenuRef = useRef<HTMLDivElement>(null);
+  const scopeMenuRef = useRef<HTMLDivElement>(null);
+
+  const docTitle = useCallback(
+    (id: string) => {
+      const d = allDocs.find((x) => x.id === id);
+      return d ? (d.title || d.filename) : id;
+    },
+    [allDocs],
+  );
 
   // Show one conversation at a time: only the active session's messages.
   const visibleMessages = useMemo(
@@ -167,10 +182,28 @@ export default function ChatPanel({ docId, onClose, onDocumentEdited }: ChatPane
     return () => window.removeEventListener("mousedown", onDown);
   }, [sessionMenuOpen]);
 
+  // Close the scope menu on outside click
+  useEffect(() => {
+    if (!scopeMenuOpen) return;
+    const onDown = (e: MouseEvent) => {
+      if (scopeMenuRef.current && !scopeMenuRef.current.contains(e.target as Node)) {
+        setScopeMenuOpen(false);
+      }
+    };
+    window.addEventListener("mousedown", onDown);
+    return () => window.removeEventListener("mousedown", onDown);
+  }, [scopeMenuOpen]);
+
+  const toggleScopeDoc = useCallback((id: string) => {
+    setScopeDocIds((prev) =>
+      prev.includes(id) ? prev.filter((d) => d !== id) : [...prev, id],
+    );
+  }, []);
+
   // Delete a single session; if it was active, fall back to another one.
   const handleDeleteSession = useCallback(async (sid: number) => {
     try {
-      await deleteSession(docId, sid);
+      await deleteSession(sid);
       const remaining = messages
         .map((m) => m.sessionId ?? 1)
         .filter((id) => id !== sid);
@@ -182,7 +215,7 @@ export default function ChatPanel({ docId, onClose, onDocumentEdited }: ChatPane
     } catch (e) {
       setError(String(e));
     }
-  }, [docId, sessionId, messages]);
+  }, [sessionId, messages]);
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
@@ -197,14 +230,23 @@ export default function ChatPanel({ docId, onClose, onDocumentEdited }: ChatPane
     e.target.style.height = `${Math.min(e.target.scrollHeight, 120)}px`;
   };
 
-  // Load chat history on mount or when docId changes
+  // Load the document list once (for the scope picker).
   useEffect(() => {
-    // Clear stale state immediately so previous doc's messages don't linger
+    listDocuments().then(setAllDocs).catch(() => { /* ignore */ });
+  }, []);
+
+  // Seed scope with the file the panel was opened from.
+  useEffect(() => {
+    setScopeDocIds([initialDocId]);
+  }, [initialDocId]);
+
+  // Load GLOBAL chat history on mount (sessions are not tied to a doc).
+  useEffect(() => {
     setMessages([]);
     setSessionId(1);
     setError(null);
 
-    getChatHistory(docId).then((history) => {
+    getChatHistory().then((history) => {
       if (history.length > 0) {
         const msgs: Message[] = history.map((h) => ({
           id: String(h.id),
@@ -216,7 +258,7 @@ export default function ChatPanel({ docId, onClose, onDocumentEdited }: ChatPane
         setSessionId(Math.max(...history.map(h => h.session_id)));
       }
     }).catch(() => { /* ignore load errors */ });
-  }, [docId]);
+  }, []);
 
   // Close drawer on Escape
   useEffect(() => {
@@ -230,6 +272,7 @@ export default function ChatPanel({ docId, onClose, onDocumentEdited }: ChatPane
   const sendMessage = useCallback(async () => {
     const question = input.trim();
     if (!question || streaming) return;
+    if (scopeDocIds.length === 0) { setError("Hãy chọn ít nhất một tài liệu."); return; }
     setInput("");
     if (inputRef.current) inputRef.current.style.height = "auto";
     setError(null);
@@ -240,7 +283,7 @@ export default function ChatPanel({ docId, onClose, onDocumentEdited }: ChatPane
     setStreaming(true);
 
     try {
-      await streamChat(docId, question, (token) => {
+      await streamChat(scopeDocIds, question, (token) => {
         setMessages((prev) =>
           prev.map((m) => m.id === assistantMsg.id ? { ...m, content: m.content + token } : m)
         );
@@ -254,7 +297,7 @@ export default function ChatPanel({ docId, onClose, onDocumentEdited }: ChatPane
       );
       setStreaming(false);
     }
-  }, [docId, input, streaming, sessionId, onDocumentEdited]);
+  }, [scopeDocIds, input, streaming, sessionId, onDocumentEdited]);
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendMessage(); }
@@ -365,6 +408,65 @@ export default function ChatPanel({ docId, onClose, onDocumentEdited }: ChatPane
         </div>
       </div>
 
+      {/* Scope picker — which documents are in chat scope */}
+      <div ref={scopeMenuRef} className="relative flex items-center gap-2 px-4 py-2 border-b border-[var(--border)] shrink-0 bg-[var(--surface-glass)] z-10">
+        <span className="text-[10px] font-medium uppercase tracking-wider text-[var(--text-faint)] shrink-0">
+          Scope
+        </span>
+        <div className="flex flex-wrap items-center gap-1.5 flex-1 min-w-0">
+          {scopeDocIds.map((id) => (
+            <span key={id} className="inline-flex items-center gap-1 max-w-[160px] px-2 py-0.5 rounded-full bg-[var(--accent-subtle)] border border-[var(--border-glow)] text-[11px] text-[var(--accent-text)]">
+              <span className="truncate">{docTitle(id)}</span>
+              {scopeDocIds.length > 1 && (
+                <button
+                  type="button"
+                  onClick={() => toggleScopeDoc(id)}
+                  disabled={streaming}
+                  className="shrink-0 hover:text-[var(--error)] disabled:opacity-40"
+                  title="Remove from scope"
+                >
+                  <IconX />
+                </button>
+              )}
+            </span>
+          ))}
+          <button
+            type="button"
+            onClick={() => setScopeMenuOpen((v) => !v)}
+            disabled={streaming}
+            className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full border border-[var(--border-strong)] text-[11px] text-[var(--text-muted)] hover:border-[var(--border-hover)] hover:text-[var(--text-primary)] disabled:opacity-40"
+            title="Add files to scope"
+          >
+            <IconPlus /> File
+          </button>
+        </div>
+
+        {scopeMenuOpen && (
+          <div role="listbox" className="absolute left-4 right-4 top-[calc(100%+4px)] z-30 max-h-72 overflow-y-auto rounded-xl border border-[var(--border-strong)] bg-[var(--surface)] shadow-2xl shadow-black/40 p-1.5 scale-in origin-top">
+            {allDocs.length === 0 && (
+              <div className="px-2.5 py-2 text-[12px] text-[var(--text-faint)]">No documents</div>
+            )}
+            {allDocs.map((d) => {
+              const checked = scopeDocIds.includes(d.id);
+              return (
+                <div
+                  key={d.id}
+                  role="option"
+                  aria-selected={checked}
+                  onClick={() => toggleScopeDoc(d.id)}
+                  className={`flex items-center gap-2 rounded-lg px-2.5 py-2 cursor-pointer transition-colors ${
+                    checked ? "bg-[var(--accent-subtle)] text-[var(--text-primary)]" : "text-[var(--text-secondary)] hover:bg-[var(--surface-hover)]"
+                  }`}
+                >
+                  <input type="checkbox" readOnly checked={checked} className="accent-[var(--accent)]" />
+                  <span className="flex-1 min-w-0 truncate text-[12px]">{d.title || d.filename}</span>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+
       {/* Messages */}
       <div ref={scrollRef} className="flex-1 overflow-y-auto p-4 flex flex-col gap-5 pb-40">
         {visibleMessages.length === 0 && (
@@ -373,10 +475,10 @@ export default function ChatPanel({ docId, onClose, onDocumentEdited }: ChatPane
               <IconBot />
             </div>
             <p className="text-[13px] font-medium text-[var(--text-secondary)] mb-1.5">
-              Ask anything about this document
+              Ask anything about the selected documents
             </p>
             <p className="text-[11px] text-[var(--text-faint)] m-0 leading-relaxed max-w-[240px]">
-              Answers are grounded in this document only.
+              Answers are grounded in the selected documents.
             </p>
           </div>
         )}
@@ -401,7 +503,7 @@ export default function ChatPanel({ docId, onClose, onDocumentEdited }: ChatPane
               <button
                 onClick={async () => {
                   try {
-                    const newId = await startNewSession(docId);
+                    const newId = await startNewSession();
                     setSessionId(newId);
                   } catch (e) {
                     setError(String(e));
@@ -449,7 +551,7 @@ export default function ChatPanel({ docId, onClose, onDocumentEdited }: ChatPane
           </div>
           
           <p className="text-[10px] text-center text-[var(--text-faint)] m-0 mt-1 tracking-wide uppercase">
-            Grounded in this document only · Shift+Enter for new line
+            Grounded in selected documents · Shift+Enter for new line
           </p>
         </div>
       </div>
