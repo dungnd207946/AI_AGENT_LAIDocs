@@ -25,10 +25,12 @@ from ..services.agent import (
 from ..services.chat_history import (
     get_current_session_id,
     get_messages,
+    get_messages_for_session,
     save_message,
     start_new_session,
     delete_messages,
 )
+from ..services.compactor import compact_if_needed
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +69,7 @@ async def chat_stream(body: ChatRequest):
 
     Each SSE event contains a text delta.  The stream ends with [DONE].
     The agent uses Tree Reasoning retrieval to ground answers in the document.
+    Before streaming, checks if conversation history needs compaction.
     """
     settings = get_settings()
     from ..services.llm import is_llm_configured
@@ -78,6 +81,12 @@ async def chat_stream(body: ChatRequest):
 
     # Determine session
     session_id = body.session_id or get_current_session_id(body.doc_id)
+
+    # Auto-compact display history if over token threshold (best-effort, non-blocking)
+    try:
+        await compact_if_needed(body.doc_id, settings)
+    except Exception:
+        logger.exception("compact_if_needed failed; continuing without compact")
 
     # Set tool context so retrieve_context knows which doc to search
     set_tool_context(body.doc_id, settings)
@@ -91,6 +100,8 @@ async def chat_stream(body: ChatRequest):
             agent = await get_document_agent()
             config = {
                 "configurable": {
+                    # thread_id is stable per (doc, session) → LangGraph
+                    # AsyncSqliteSaver replays the full conversation on resume.
                     "thread_id": f"doc-{body.doc_id}-s{session_id}",
                 },
                 "run_name": "document-chat",
@@ -101,8 +112,16 @@ async def chat_stream(body: ChatRequest):
                 "tags": ["ai-agent-chatbot"],
             }
 
+            # Load session history from SQLite and inject into agent input.
+            # This restores conversation context across restarts since MemorySaver
+            # is intentionally in-memory only (AsyncSqliteSaver is incompatible
+            # with the singleton agent pattern — see docs/plans/e2e-issues.md).
+            prior = get_messages_for_session(body.doc_id, session_id)
             stream_input = {
-                "messages": [{"role": "user", "content": body.question}],
+                "messages": [
+                    *[{"role": m["role"], "content": m["content"]} for m in prior],
+                    {"role": "user", "content": body.question},
+                ],
             }
 
             # astream_events v2 yields dicts — filter to AI text tokens only,

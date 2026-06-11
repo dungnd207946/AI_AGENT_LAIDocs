@@ -1,8 +1,19 @@
 """Chat history service for display-layer message persistence.
 
-This stores ALL messages across ALL sessions for UI display purposes.
-Separate from the agent's conversation memory (LangGraph checkpointer)
-which only holds the current session.
+Stores ALL messages across ALL sessions for UI display purposes.
+Separate from the agent's conversation memory (LangGraph MemorySaver
+which is intentionally in-memory only — see docs/plans/e2e-issues.md).
+
+Context injection:
+  - get_messages_for_session() — load a session's messages to inject into
+    the agent on resume, replacing the lost MemorySaver state.
+
+Compact support:
+  - Rows with role='summary' are synthetic summaries produced by the compactor.
+  - get_messages()             — UI display (all rows including summaries)
+  - get_messages_for_compact() — compactor input (latest summary + messages after it)
+  - save_compact_summary()     — insert a summary row
+  - delete_compacted_messages() — remove rows that were folded into a summary
 """
 
 from __future__ import annotations
@@ -37,7 +48,10 @@ def save_message(doc_id: str, session_id: int, role: str, content: str) -> None:
 
 
 def get_messages(doc_id: str) -> list[dict]:
-    """Load all messages for a document, ordered by creation time."""
+    """Load all messages for a document, ordered by creation time.
+
+    Includes summary rows (role='summary') so the UI can show them.
+    """
     with get_db() as conn:
         rows = conn.execute(
             """SELECT id, session_id, role, content, created_at
@@ -58,7 +72,124 @@ def get_messages(doc_id: str) -> list[dict]:
     ]
 
 
+def get_messages_for_session(doc_id: str, session_id: int) -> list[dict]:
+    """Load messages for agent context injection on session resume.
+
+    Returns 'user' and 'assistant' rows for this session only.
+    If a compact summary exists for this doc, it is prepended as a synthetic
+    user/assistant exchange so the agent has prior context without seeing the
+    raw role='summary' marker (which LangGraph does not understand).
+    """
+    with get_db() as conn:
+        # Latest compact summary across all sessions
+        summary_row = conn.execute(
+            """SELECT content FROM chat_messages
+               WHERE doc_id = ? AND role = 'summary'
+               ORDER BY created_at DESC LIMIT 1""",
+            (doc_id,),
+        ).fetchone()
+
+        rows = conn.execute(
+            """SELECT role, content FROM chat_messages
+               WHERE doc_id = ? AND session_id = ?
+                 AND role IN ('user', 'assistant')
+               ORDER BY created_at ASC""",
+            (doc_id, session_id),
+        ).fetchall()
+
+    result: list[dict] = []
+    if summary_row:
+        # Inject as a synthetic assistant turn so the agent treats it as prior context
+        result.append({"role": "user", "content": "Summarize our conversation so far."})
+        result.append({"role": "assistant", "content": summary_row[0]})
+    result += [{"role": row[0], "content": row[1]} for row in rows]
+    return result
+
+
+def get_messages_for_compact(doc_id: str) -> list[dict]:
+    """Load messages for the compactor.
+
+    Returns the latest summary row (if any) followed by all subsequent
+    regular messages, so the compactor always works on a flat sequence
+    without re-processing already-summarised content.
+    """
+    with get_db() as conn:
+        # Find the most recent summary row
+        summary_row = conn.execute(
+            """SELECT id, session_id, role, content, created_at
+               FROM chat_messages
+               WHERE doc_id = ? AND role = 'summary'
+               ORDER BY created_at DESC
+               LIMIT 1""",
+            (doc_id,),
+        ).fetchone()
+
+        if summary_row:
+            # Messages AFTER the last summary (regular chat only)
+            rows = conn.execute(
+                """SELECT id, session_id, role, content, created_at
+                   FROM chat_messages
+                   WHERE doc_id = ?
+                     AND role IN ('user', 'assistant')
+                     AND created_at > ?
+                   ORDER BY created_at ASC""",
+                (doc_id, summary_row[4]),
+            ).fetchall()
+            result = [
+                {
+                    "id": summary_row[0],
+                    "session_id": summary_row[1],
+                    "role": summary_row[2],
+                    "content": summary_row[3],
+                    "created_at": summary_row[4],
+                }
+            ]
+        else:
+            rows = conn.execute(
+                """SELECT id, session_id, role, content, created_at
+                   FROM chat_messages
+                   WHERE doc_id = ? AND role IN ('user', 'assistant')
+                   ORDER BY created_at ASC""",
+                (doc_id,),
+            ).fetchall()
+            result = []
+
+    result += [
+        {
+            "id": row[0],
+            "session_id": row[1],
+            "role": row[2],
+            "content": row[3],
+            "created_at": row[4],
+        }
+        for row in rows
+    ]
+    return result
+
+
+def save_compact_summary(doc_id: str, session_id: int, summary: str) -> None:
+    """Insert a compacted summary row (role='summary')."""
+    with get_db() as conn:
+        conn.execute(
+            """INSERT INTO chat_messages (doc_id, session_id, role, content)
+               VALUES (?, ?, 'summary', ?)""",
+            (doc_id, session_id, summary),
+        )
+
+
+def delete_compacted_messages(doc_id: str, message_ids: list[int]) -> None:
+    """Delete rows that have been folded into a summary."""
+    if not message_ids:
+        return
+    placeholders = ",".join("?" * len(message_ids))
+    with get_db() as conn:
+        conn.execute(
+            f"DELETE FROM chat_messages WHERE doc_id = ? AND id IN ({placeholders})",
+            [doc_id, *message_ids],
+        )
+
+
 def delete_messages(doc_id: str) -> None:
-    """Delete all messages for a document."""
+    """Delete all messages for a document (including summaries)."""
     with get_db() as conn:
         conn.execute("DELETE FROM chat_messages WHERE doc_id = ?", (doc_id,))

@@ -1,16 +1,12 @@
 """SQLite database layer for LAIDocs.
-
 Stores document metadata, folder tree, and tree index JSON.
 """
-
 from __future__ import annotations
-
 import sqlite3
 import threading
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Generator
-
 from .config import LAIDOCS_HOME
 
 DB_PATH = LAIDOCS_HOME / "data" / "laidocs.db"
@@ -26,7 +22,6 @@ CREATE TABLE IF NOT EXISTS folders (
     parent_path TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
-
 CREATE TABLE IF NOT EXISTS documents (
     id TEXT PRIMARY KEY,
     folder TEXT NOT NULL,
@@ -42,7 +37,8 @@ CREATE TABLE IF NOT EXISTS documents (
 );
 """
 
-# Migration for existing databases
+# Migration for existing databases.
+# IMPORTANT: append-only — never edit or reorder existing entries.
 _MIGRATIONS = [
     "ALTER TABLE documents ADD COLUMN tree_index TEXT",
     """CREATE TABLE IF NOT EXISTS chat_messages (
@@ -68,6 +64,20 @@ _MIGRATIONS = [
     PRIMARY KEY (doc_id, unit_id)
 )""",
     "CREATE INDEX IF NOT EXISTS idx_doc_embeddings_doc ON document_embeddings(doc_id)",
+    # Recreate chat_messages to allow role='summary' for compacted history rows.
+    # SQLite does not support ALTER COLUMN, so we rename + recreate.
+    """CREATE TABLE IF NOT EXISTS chat_messages_v2 (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    doc_id TEXT NOT NULL,
+    session_id INTEGER NOT NULL DEFAULT 1,
+    role TEXT NOT NULL CHECK(role IN ('user', 'assistant', 'summary')),
+    content TEXT NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+)""",
+    "INSERT OR IGNORE INTO chat_messages_v2 SELECT * FROM chat_messages WHERE role IN ('user','assistant')",
+    "DROP TABLE IF EXISTS chat_messages",
+    "ALTER TABLE chat_messages_v2 RENAME TO chat_messages",
+    "CREATE INDEX IF NOT EXISTS idx_chat_messages_doc_id ON chat_messages(doc_id)",
 ]
 
 
@@ -83,7 +93,7 @@ def init_db() -> None:
             try:
                 conn.execute(migration)
             except sqlite3.OperationalError:
-                pass  # column already exists
+                pass  # column already exists or table already recreated
 
 
 # ---------------------------------------------------------------------------

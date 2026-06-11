@@ -4,7 +4,9 @@ Uses langgraph.prebuilt.create_react_agent which works reliably across all
 LLM providers (Gemini, OpenAI-compatible, Anthropic).
 
 Memory:
-  - Conversation working memory: LangGraph MemorySaver (per-session)
+  - Conversation memory: durable AsyncSqliteSaver checkpointer
+    (~/.laidocs/data/checkpoints.db) — survives restarts, keyed per session
+    via thread_id "doc-{doc_id}-s{session_id}"
   - Durable preference memory: ~/.laidocs/memories/preferences.md (read at
     agent build time; injected into the system prompt)
 
@@ -24,9 +26,10 @@ import re
 from pathlib import Path
 from typing import Any
 
+import aiosqlite
 from langchain_core.messages import HumanMessage
 from langchain_core.tools import tool
-from langgraph.checkpoint.memory import MemorySaver
+from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.prebuilt import create_react_agent
 
@@ -45,6 +48,7 @@ logger = logging.getLogger(__name__)
 
 MEMORY_DIR = LAIDOCS_HOME / "memories"
 PREFERENCES_FILE = MEMORY_DIR / "preferences.md"
+CHECKPOINT_DB = LAIDOCS_HOME / "data" / "checkpoints.db"
 
 # ---------------------------------------------------------------------------
 # SOUL System Prompt
@@ -378,15 +382,37 @@ def _build_system_prompt() -> str:
 # Agent factory
 # ---------------------------------------------------------------------------
 
-_checkpointer: MemorySaver | None = None
+_checkpointer: AsyncSqliteSaver | None = None
+_checkpointer_conn: aiosqlite.Connection | None = None
 _agent: CompiledStateGraph | None = None
 
 
-async def _get_checkpointer() -> MemorySaver:
-    global _checkpointer
+async def _get_checkpointer() -> AsyncSqliteSaver:
+    """Get or create the durable SQLite conversation checkpointer.
+
+    Backed by ~/.laidocs/data/checkpoints.db so per-session conversation
+    memory survives backend restarts. Uses one long-lived aiosqlite
+    connection, closed on app shutdown via close_checkpointer().
+    """
+    global _checkpointer, _checkpointer_conn
     if _checkpointer is None:
-        _checkpointer = MemorySaver()
+        CHECKPOINT_DB.parent.mkdir(parents=True, exist_ok=True)
+        _checkpointer_conn = await aiosqlite.connect(str(CHECKPOINT_DB))
+        _checkpointer = AsyncSqliteSaver(_checkpointer_conn)
+        await _checkpointer.setup()
     return _checkpointer
+
+
+async def close_checkpointer() -> None:
+    """Close the durable checkpointer connection (call on app shutdown)."""
+    global _checkpointer, _checkpointer_conn
+    if _checkpointer_conn is not None:
+        try:
+            await _checkpointer_conn.close()
+        except Exception:
+            logger.exception("Failed to close checkpointer connection")
+    _checkpointer_conn = None
+    _checkpointer = None
 
 
 async def get_document_agent() -> CompiledStateGraph:

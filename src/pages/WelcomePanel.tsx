@@ -390,7 +390,7 @@ export default function WelcomePanel() {
               <path d="M22 4L12 13 2 4" />
             </svg>
             <span style={{ fontSize: 11, color: "var(--text-faint)", letterSpacing: "0.2px" }}>
-              ngohongthai.uet@gmail.com
+              Chatbot_GENAI_MASTER_PROJECT
             </span>
           </div>
         </div>

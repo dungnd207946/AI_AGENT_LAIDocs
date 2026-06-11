@@ -72,7 +72,9 @@ async def lifespan(app: FastAPI):
 
     print("[sidecar] Server ready")
     yield
-    # Shutdown (nothing to clean up yet)
+    # Shutdown — close the durable conversation checkpointer connection
+    from backend.services.agent import close_checkpointer
+    await close_checkpointer()
 
 
 # ── App ────────────────────────────────────────────────────────────
