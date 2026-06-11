@@ -19,6 +19,7 @@ Compact support:
 from __future__ import annotations
 
 from ..core.database import get_db
+from . import retrieval
 
 from datetime import datetime, timezone
 import re
@@ -112,13 +113,50 @@ def start_new_session(doc_id: str) -> int:
     return current + 1
 
 
-def save_message(doc_id: str, session_id: int, role: str, content: str) -> None:
+def save_message(doc_id: str, session_id: int, role: str, content: str) -> int:
     """Save a single message to the display history."""
     with get_db() as conn:
-        conn.execute(
+        cursor = conn.execute(
             """INSERT INTO chat_messages (doc_id, session_id, role, content)
                VALUES (?, ?, ?, ?)""",
             (doc_id, session_id, role, content),
+        )
+        return int(cursor.lastrowid)
+
+
+def save_message_evidence(message_id: int, doc_id: str, evidence: list[dict]) -> None:
+    """Save retrieval-unit evidence used by an assistant message."""
+    if not message_id or not evidence:
+        return
+
+    rows = []
+    seen: set[str] = set()
+    for item in evidence:
+        unit_id = str(item.get("unit_id") or "")
+        unit_hash = str(item.get("unit_hash") or "")
+        if not unit_id or not unit_hash or unit_id in seen:
+            continue
+        seen.add(unit_id)
+        rows.append(
+            (
+                message_id,
+                doc_id,
+                unit_id,
+                unit_hash,
+                str(item.get("title") or ""),
+                str(item.get("kind") or "text"),
+            )
+        )
+
+    if not rows:
+        return
+
+    with get_db() as conn:
+        conn.executemany(
+            """INSERT OR REPLACE INTO chat_message_evidence
+               (message_id, doc_id, unit_id, unit_hash, title, kind)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            rows,
         )
 
 
@@ -165,7 +203,7 @@ def get_messages_for_session(doc_id: str, session_id: int) -> list[dict]:
         ).fetchone()
 
         rows = conn.execute(
-            """SELECT role, content FROM chat_messages
+            """SELECT id, role, content FROM chat_messages
                WHERE doc_id = ? AND session_id = ?
                  AND role IN ('user', 'assistant')
                ORDER BY created_at ASC""",
@@ -174,11 +212,91 @@ def get_messages_for_session(doc_id: str, session_id: int) -> list[dict]:
 
     result: list[dict] = []
     if summary_row:
-        # Inject as a synthetic assistant turn so the agent treats it as prior context
+        # Inject as a synthetic assistant turn so the agent treats it as prior context.
+        # Summaries are not chunk-level evidence and must not override fresh retrieval.
         result.append({"role": "user", "content": "Summarize our conversation so far."})
-        result.append({"role": "assistant", "content": summary_row[0]})
-    result += [{"role": row[0], "content": row[1]} for row in rows]
+        result.append({
+            "role": "assistant",
+            "content": (
+                f"{summary_row[0]}\n\n"
+                "[UNVERIFIED HISTORY - conversation summary only; do not use as document evidence.]"
+            ),
+        })
+
+    current_hashes = retrieval.get_current_unit_hashes(doc_id)
+    evidence_by_message = _load_evidence_by_message_id(doc_id, [int(row[0]) for row in rows])
+    for row in rows:
+        message_id = int(row[0])
+        role = row[1]
+        content = row[2]
+        if role == "assistant":
+            content = _annotate_assistant_history(content, evidence_by_message.get(message_id, []), current_hashes)
+        result.append({"role": role, "content": content})
     return result
+
+
+def _load_evidence_by_message_id(doc_id: str, message_ids: list[int]) -> dict[int, list[dict]]:
+    if not message_ids:
+        return {}
+
+    placeholders = ",".join("?" for _ in message_ids)
+    with get_db() as conn:
+        rows = conn.execute(
+            f"""SELECT message_id, unit_id, unit_hash, title, kind
+                FROM chat_message_evidence
+                WHERE doc_id = ? AND message_id IN ({placeholders})
+                ORDER BY message_id ASC, unit_id ASC""",
+            [doc_id, *message_ids],
+        ).fetchall()
+
+    evidence_by_message: dict[int, list[dict]] = {}
+    for row in rows:
+        message_id = int(row[0])
+        evidence_by_message.setdefault(message_id, []).append(
+            {
+                "unit_id": row[1],
+                "unit_hash": row[2],
+                "title": row[3],
+                "kind": row[4],
+            }
+        )
+    return evidence_by_message
+
+
+def _annotate_assistant_history(
+    content: str,
+    evidence: list[dict],
+    current_hashes: dict[str, str],
+) -> str:
+    if not evidence:
+        return (
+            f"{content}\n\n"
+            "[UNVERIFIED HISTORY - this older answer has no chunk evidence metadata; "
+            "do not use it as evidence for document facts.]"
+        )
+
+    stale_units = []
+    for item in evidence:
+        unit_id = str(item.get("unit_id") or "")
+        saved_hash = str(item.get("unit_hash") or "")
+        if current_hashes.get(unit_id) != saved_hash:
+            stale_units.append(unit_id)
+
+    if stale_units:
+        return (
+            f"{content}\n\n"
+            "[STALE HISTORY - this answer referenced document chunks that have changed "
+            f"or no longer exist: {', '.join(stale_units)}. Do not use it as evidence; "
+            "call retrieve_context and trust the latest retrieved context.]"
+        )
+
+    valid_units = [str(item.get("unit_id") or "") for item in evidence if item.get("unit_id")]
+    return (
+        f"{content}\n\n"
+        "[VALID HISTORY - referenced document chunks are unchanged "
+        f"({', '.join(valid_units)}). You may use this for conversation continuity, "
+        "but current retrieve_context output remains authoritative for document facts.]"
+    )
 
 
 def get_messages_for_compact(doc_id: str) -> list[dict]:
@@ -268,6 +386,7 @@ def delete_messages(doc_id: str) -> None:
     """Delete all messages for a document (including summaries)."""
     with get_db() as conn:
         conn.execute("DELETE FROM chat_messages WHERE doc_id = ?", (doc_id,))
+
 
 def delete_session(doc_id: str, session_id: int) -> None:
     """Delete all messages belonging to a single session of a document."""

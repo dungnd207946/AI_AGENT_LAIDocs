@@ -124,6 +124,10 @@ export async function clearChatHistory(docId: string): Promise<void> {
   await apiDelete(`/api/chat/history/${docId}`);
 }
 
+export async function deleteSession(docId: string, sessionId: number): Promise<void> {
+  await apiDelete(`/api/chat/session/${docId}/${sessionId}`);
+}
+
 // ── Sidecar health check ──────────────────────────────────────────
 
 const HEALTH_PATH = `${API_BASE}/api/health`;

@@ -4,10 +4,12 @@ from __future__ import annotations
 
 from typing import Any
 
+import httpx
 from fastapi import APIRouter, HTTPException
+from openai import OpenAI
 from pydantic import BaseModel
 
-from ..core.config import get_settings, reload_settings
+from ..core.config import RerankerConfig, get_settings, reload_settings
 from ..services.agent import reset_agent
 
 router = APIRouter(prefix="/api/settings", tags=["settings"])
@@ -18,12 +20,14 @@ router = APIRouter(prefix="/api/settings", tags=["settings"])
 class _MaskedSettings(BaseModel):
     llm: dict[str, Any]
     vlm: dict[str, Any]
+    reranker: dict[str, Any]
     port: int
 
 
 class _SettingsUpdate(BaseModel):
     llm: dict[str, Any] | None = None
     vlm: dict[str, Any] | None = None
+    reranker: dict[str, Any] | None = None
     port: int | None = None
 
 
@@ -33,6 +37,14 @@ class _TestRequest(BaseModel):
     api_key: str = ""
     model: str = ""
     text: str = "Hello, this is a test."
+
+
+class _TestRerankerRequest(BaseModel):
+    base_url: str = ""
+    api_key: str = ""
+    model: str = ""
+    query: str = "What does the document say about installation?"
+    documents: list[str] | None = None
 
 
 # ── helpers ─────────────────────────────────────────────────────────
@@ -55,6 +67,7 @@ async def read_settings():
     return _MaskedSettings(
         llm=_mask(s.llm),
         vlm=_mask(s.vlm),
+        reranker=_mask(s.reranker),
         port=s.port,
     )
 
@@ -66,6 +79,8 @@ async def update_settings(body: _SettingsUpdate):
         s.llm = s.llm.model_copy(update=body.llm)
     if body.vlm is not None:
         s.vlm = s.vlm.model_copy(update=body.vlm)
+    if body.reranker is not None:
+        s.reranker = s.reranker.model_copy(update=body.reranker)
     if body.port is not None:
         s.port = body.port
     s.save_to_file()
@@ -78,6 +93,7 @@ async def update_settings(body: _SettingsUpdate):
     return _MaskedSettings(
         llm=_mask(s2.llm),
         vlm=_mask(s2.vlm),
+        reranker=_mask(s2.reranker),
         port=s2.port,
     )
 
@@ -127,5 +143,63 @@ async def test_vlm(body: _TestRequest):
         )
         reply = resp.choices[0].message.content if resp.choices else ""
         return {"success": True, "response": reply}
+    except Exception as exc:
+        return {"success": False, "error": str(exc)}
+
+
+@router.post("/test-reranker")
+async def test_reranker(body: _TestRerankerRequest):
+    """Validate reranker credentials against a Jina-compatible endpoint."""
+    s = get_settings()
+    cfg = RerankerConfig(
+        enabled=True,
+        base_url=body.base_url or s.active_reranker.base_url,
+        api_key=body.api_key or s.active_reranker.api_key,
+        model=body.model or s.active_reranker.model,
+        top_n=min(max(1, len(body.documents or [])), 8) if body.documents else 2,
+        candidate_k=s.active_reranker.candidate_k,
+        timeout_s=s.active_reranker.timeout_s,
+    )
+    if not cfg.base_url or not cfg.model:
+        raise HTTPException(
+            status_code=400,
+            detail="Reranker base_url and model are required",
+        )
+
+    documents = body.documents or [
+        "Installation guide: run the setup command and verify dependencies.",
+        "Troubleshooting: if the service does not start, inspect the logs.",
+    ]
+
+    payload = {
+        "model": cfg.model,
+        "query": body.query,
+        "documents": documents,
+        "top_n": min(max(1, cfg.top_n), len(documents)),
+    }
+    headers = {"Content-Type": "application/json"}
+    if cfg.api_key:
+        headers["Authorization"] = f"Bearer {cfg.api_key}"
+
+    try:
+        timeout = httpx.Timeout(cfg.timeout_s)
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            resp = await client.post(cfg.base_url, json=payload, headers=headers)
+            resp.raise_for_status()
+            data = resp.json()
+        results = data.get("results") if isinstance(data, dict) else None
+        if not isinstance(results, list):
+            return {"success": False, "error": "Invalid reranker response: missing results"}
+        return {
+            "success": True,
+            "results": [
+                {
+                    "index": item.get("index"),
+                    "score": item.get("relevance_score"),
+                }
+                for item in results[: payload["top_n"]]
+                if isinstance(item, dict)
+            ],
+        }
     except Exception as exc:
         return {"success": False, "error": str(exc)}

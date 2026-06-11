@@ -86,7 +86,7 @@ export default function CrawlDialog({ open, onClose, onCrawlSuccess, initialFold
           <label style={{ display: "block", fontSize: 11, color: "var(--text-muted)", letterSpacing: "1.4px", textTransform: "uppercase", marginBottom: 6 }}>Folder</label>
           <select value={selectedFolder} onChange={(e) => setSelectedFolder(e.target.value)} className="warp-input" style={{ appearance: "none" }}>
             <option value="">None</option>
-            {folders.map((f) => <option key={f.path} value={f.path}>{f.name || f.path}</option>)}
+            {folders.map((f) => <option key={f.path} value={f.path}>{f.path === "unsorted" ? "General" : (f.name || f.path)}</option>)}
           </select>
         </div>
 

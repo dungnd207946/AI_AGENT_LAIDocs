@@ -9,6 +9,7 @@ Endpoints:
 
 from __future__ import annotations
 
+import hashlib
 import logging
 
 from fastapi import APIRouter, HTTPException
@@ -16,25 +17,48 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from ..core.config import get_settings
+from ..core.database import get_db
 from ..services.agent import (
     get_document_agent,
     set_tool_context,
     reset_agent,
     document_was_edited,
+    get_retrieved_evidence,
 )
 from ..services.chat_history import (
     get_current_session_id,
     get_messages,
     get_messages_for_session,
     save_message,
+    save_message_evidence,
     start_new_session,
     delete_messages,
+    delete_session,
 )
 from ..services.compactor import compact_if_needed
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/chat", tags=["chat"])
+
+
+def _content_to_text(content) -> str:
+    """Normalize LangChain message content blocks into plain streamed text."""
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict):
+                value = item.get("text") or item.get("content")
+                if isinstance(value, str):
+                    parts.append(value)
+        return "".join(parts)
+    return str(content)
 
 
 # ---------------------------------------------------------------------------
@@ -63,6 +87,21 @@ class SessionResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+def _get_document_content_hash(doc_id: str) -> str:
+    """Hash current document content to isolate agent memory per document version."""
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT content FROM documents WHERE id = ?",
+            (doc_id,),
+        ).fetchone()
+
+    if not row:
+        return "missing"
+
+    content = row[0] or ""
+    return hashlib.sha256(content.encode("utf-8")).hexdigest()[:16]
+
+
 @router.post("/stream")
 async def chat_stream(body: ChatRequest):
     """Ask a question about a document (Server-Sent Events stream).
@@ -81,6 +120,7 @@ async def chat_stream(body: ChatRequest):
 
     # Determine session
     session_id = body.session_id or get_current_session_id(body.doc_id)
+    content_hash = _get_document_content_hash(body.doc_id)
 
     # Auto-compact display history if over token threshold (best-effort, non-blocking)
     try:
@@ -100,9 +140,9 @@ async def chat_stream(body: ChatRequest):
             agent = await get_document_agent()
             config = {
                 "configurable": {
-                    # thread_id is stable per (doc, session) → LangGraph
-                    # AsyncSqliteSaver replays the full conversation on resume.
-                    "thread_id": f"doc-{body.doc_id}-s{session_id}",
+                    # Include content hash so document edits do not replay
+                    # checkpointed memory from a previous document version.
+                    "thread_id": f"doc-{body.doc_id}-s{session_id}-v{content_hash}",
                 },
                 "run_name": "document-chat",
                 "metadata": {
@@ -112,13 +152,17 @@ async def chat_stream(body: ChatRequest):
                 "tags": ["ai-agent-chatbot"],
             }
 
-            # Load session history from SQLite and inject into agent input.
-            # This restores conversation context across restarts since MemorySaver
-            # is intentionally in-memory only (AsyncSqliteSaver is incompatible
-            # with the singleton agent pattern — see docs/plans/e2e-issues.md).
             prior = get_messages_for_session(body.doc_id, session_id)
             stream_input = {
                 "messages": [
+                    {
+                        "role": "system",
+                        "content": (
+                            "Prior conversation may contain history labels. "
+                            "Do not use STALE or UNVERIFIED history as evidence for document facts. "
+                            "Use prior VALID history only for continuity; the latest retrieve_context output is authoritative."
+                        ),
+                    },
                     *[{"role": m["role"], "content": m["content"]} for m in prior],
                     {"role": "user", "content": body.question},
                 ],
@@ -147,15 +191,10 @@ async def chat_stream(body: ChatRequest):
                 if not content or getattr(message_obj, "tool_call_chunks", None):
                     continue
 
-                # Gemini (google-genai SDK) may return content as a list of
-                # content blocks: [{'type': 'text', 'text': '...', ...}]
-                if isinstance(content, list):
-                    token = "".join(
-                        block.get("text", "") if isinstance(block, dict) else str(block)
-                        for block in content
-                    )
-                else:
-                    token = content
+                token = _content_to_text(content)
+                if not token:
+                    continue
+
                 full_response += token
                 escaped = token.replace("\n", "\\n")
                 yield f"data: {escaped}\n\n"
@@ -168,7 +207,12 @@ async def chat_stream(body: ChatRequest):
             if full_response:
                 try:
                     save_message(body.doc_id, session_id, "user", body.question)
-                    save_message(body.doc_id, session_id, "assistant", full_response)
+                    assistant_message_id = save_message(body.doc_id, session_id, "assistant", full_response)
+                    save_message_evidence(
+                        assistant_message_id,
+                        body.doc_id,
+                        get_retrieved_evidence(),
+                    )
                 except Exception:
                     logger.exception("Failed to save chat history")
             # Signal the frontend to reload the document if the agent edited it
@@ -212,3 +256,14 @@ async def clear_chat_history(doc_id: str) -> dict:
     delete_messages(doc_id)
     reset_agent()
     return {"status": "ok", "doc_id": doc_id}
+
+
+@router.delete("/session/{doc_id}/{session_id}")
+async def delete_chat_session(doc_id: str, session_id: int) -> dict:
+    """Delete a single conversation session for a document.
+
+    Resets the agent so the deleted session's in-memory state is discarded.
+    """
+    delete_session(doc_id, session_id)
+    reset_agent()
+    return {"status": "ok", "doc_id": doc_id, "session_id": session_id}
