@@ -194,6 +194,19 @@ function RenameInput({
   );
 }
 
+// ── File label ────────────────────────────────────────────────────
+// The display title is stored without an extension, so re-attach the
+// extension from the filename (e.g. "test" + ".md" → "test.md").
+function fileLabel(doc: DocNode): string {
+  const name = doc.title || doc.filename;
+  const dot = doc.filename.lastIndexOf(".");
+  const ext = dot > 0 ? doc.filename.slice(dot) : "";
+  if (ext && !name.toLowerCase().endsWith(ext.toLowerCase())) {
+    return name + ext;
+  }
+  return name;
+}
+
 // ── TreeFile ──────────────────────────────────────────────────────
 
 function TreeFile({
@@ -265,7 +278,7 @@ function TreeFile({
         {doc.source_type === "url" ? <IconGlobe /> : <IconFile />}
       </span>
       <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-        {doc.title || doc.filename}
+        {fileLabel(doc)}
       </span>
     </button>
   );
