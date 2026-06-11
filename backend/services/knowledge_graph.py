@@ -47,6 +47,32 @@ logger = logging.getLogger(__name__)
 # the prompt asked for. Injectable so tests can supply a deterministic stub.
 Extractor = Callable[[str], dict]
 
+
+def _parse_json_object(raw: str) -> dict:
+    """Best-effort parse of a JSON object out of a model's text response.
+
+    LLMs sporadically wrap JSON in code fences, append trailing commas, or
+    truncate at the token limit. Rather than dropping the whole unit's triples
+    on a single stray comma, try a clean parse first, then a lenient pass that
+    strips fences and trailing commas before the closing brace/bracket.
+    """
+    match = re.search(r"\{.*\}", raw, re.DOTALL)
+    if not match:
+        return {}
+    snippet = match.group()
+    try:
+        return json.loads(snippet)
+    except json.JSONDecodeError:
+        pass
+    # Lenient pass: drop ```...``` fences and trailing commas (``, }`` / ``, ]``).
+    cleaned = re.sub(r"```[a-zA-Z]*", "", snippet).replace("```", "")
+    cleaned = re.sub(r",\s*([}\]])", r"\1", cleaned)
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError:
+        logger.warning("KG extractor returned unparseable JSON; skipping unit")
+        return {}
+
 # Bounds so a pathological document/question can't blow up graph work.
 MAX_HOPS = 2
 MAX_TRIPLES_PER_UNIT = 30
@@ -149,10 +175,7 @@ def make_llm_extractor(settings: Settings, *, temperature: float = 0.0,
         try:
             resp = model.invoke([{"role": "user", "content": prompt}])
             raw = resp.content if isinstance(resp.content, str) else str(resp.content)
-            match = re.search(r"\{.*\}", raw or "", re.DOTALL)
-            if not match:
-                return {}
-            data = json.loads(match.group())
+            data = _parse_json_object(raw or "")
             return data if isinstance(data, dict) else {}
         except Exception:
             logger.exception("KG extractor call failed")

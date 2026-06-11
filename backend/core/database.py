@@ -124,6 +124,7 @@ def init_db() -> None:
         _migrate_chat_messages_schema(conn)
         _migrate_document_embeddings_schema(conn)
         _migrate_chat_message_evidence_schema(conn)
+        _repair_dangling_chat_fk(conn)
 
 
 def _migrate_chat_messages_schema(conn: sqlite3.Connection) -> None:
@@ -138,9 +139,16 @@ def _migrate_chat_messages_schema(conn: sqlite3.Connection) -> None:
     if "'summary'" in table_sql:
         return
 
-    conn.execute("ALTER TABLE chat_messages RENAME TO chat_messages_old")
-    conn.execute(
-        """CREATE TABLE chat_messages (
+    # legacy_alter_table=ON prevents the RENAME below from rewriting the
+    # foreign-key references in child tables (chat_message_evidence /
+    # chat_message_chains) to point at chat_messages_old, which would then
+    # dangle after the DROP. foreign_keys=OFF lets us swap without FK checks.
+    conn.execute("PRAGMA foreign_keys=OFF")
+    conn.execute("PRAGMA legacy_alter_table=ON")
+    try:
+        conn.execute("ALTER TABLE chat_messages RENAME TO chat_messages_old")
+        conn.execute(
+            """CREATE TABLE chat_messages (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     doc_id TEXT NOT NULL,
     session_id INTEGER NOT NULL DEFAULT 1,
@@ -148,15 +156,18 @@ def _migrate_chat_messages_schema(conn: sqlite3.Connection) -> None:
     content TEXT NOT NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 )"""
-    )
-    conn.execute(
-        """INSERT INTO chat_messages (id, doc_id, session_id, role, content, created_at)
-           SELECT id, doc_id, session_id, role, content, created_at
-           FROM chat_messages_old
-           WHERE role IN ('user', 'assistant', 'summary')"""
-    )
-    conn.execute("DROP TABLE chat_messages_old")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_chat_messages_doc_id ON chat_messages(doc_id)")
+        )
+        conn.execute(
+            """INSERT INTO chat_messages (id, doc_id, session_id, role, content, created_at)
+               SELECT id, doc_id, session_id, role, content, created_at
+               FROM chat_messages_old
+               WHERE role IN ('user', 'assistant', 'summary')"""
+        )
+        conn.execute("DROP TABLE chat_messages_old")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_chat_messages_doc_id ON chat_messages(doc_id)")
+    finally:
+        conn.execute("PRAGMA legacy_alter_table=OFF")
+        conn.execute("PRAGMA foreign_keys=ON")
 
 
 def _migrate_document_embeddings_schema(conn: sqlite3.Connection) -> None:
@@ -209,6 +220,74 @@ def _migrate_chat_message_evidence_schema(conn: sqlite3.Connection) -> None:
         "CREATE INDEX IF NOT EXISTS idx_chat_message_evidence_doc "
         "ON chat_message_evidence(doc_id)"
     )
+
+
+def _repair_dangling_chat_fk(conn: sqlite3.Connection) -> None:
+    """Rebuild chat_message_* tables whose FK was rewritten to chat_messages_old.
+
+    A historical RENAME-based migration of chat_messages (run with the default
+    legacy_alter_table=OFF) silently rewrote the foreign keys of dependent
+    tables to point at chat_messages_old, which was then dropped — leaving a
+    dangling reference that makes every INSERT raise
+    'no such table: main.chat_messages_old'. Recreate the affected table with
+    the FK pointing back at chat_messages, preserving existing rows.
+    """
+    targets = {
+        "chat_message_evidence": """CREATE TABLE chat_message_evidence (
+    message_id INTEGER NOT NULL,
+    doc_id TEXT NOT NULL,
+    unit_id TEXT NOT NULL,
+    unit_hash TEXT NOT NULL,
+    title TEXT,
+    kind TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (message_id, unit_id),
+    FOREIGN KEY (message_id) REFERENCES chat_messages(id) ON DELETE CASCADE
+)""",
+        "chat_message_chains": """CREATE TABLE chat_message_chains (
+    message_id INTEGER PRIMARY KEY,
+    doc_id TEXT NOT NULL,
+    chain TEXT NOT NULL DEFAULT '',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (message_id) REFERENCES chat_messages(id) ON DELETE CASCADE
+)""",
+    }
+
+    needs_repair = []
+    for name in targets:
+        row = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name=?", (name,)
+        ).fetchone()
+        if row and "chat_messages_old" in (row[0] or ""):
+            needs_repair.append(name)
+    if not needs_repair:
+        return
+
+    conn.execute("PRAGMA foreign_keys=OFF")
+    conn.execute("PRAGMA legacy_alter_table=ON")
+    try:
+        for name in needs_repair:
+            cols = [
+                r[1] for r in conn.execute(f"PRAGMA table_info({name})").fetchall()
+            ]
+            col_list = ", ".join(cols)
+            conn.execute(f"ALTER TABLE {name} RENAME TO {name}_fix_old")
+            conn.execute(targets[name])
+            conn.execute(
+                f"INSERT INTO {name} ({col_list}) SELECT {col_list} FROM {name}_fix_old"
+            )
+            conn.execute(f"DROP TABLE {name}_fix_old")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_chat_message_evidence_doc "
+            "ON chat_message_evidence(doc_id)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_chat_message_chains_doc "
+            "ON chat_message_chains(doc_id)"
+        )
+    finally:
+        conn.execute("PRAGMA legacy_alter_table=OFF")
+        conn.execute("PRAGMA foreign_keys=ON")
 
 
 # ---------------------------------------------------------------------------
