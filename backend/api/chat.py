@@ -27,13 +27,11 @@ from ..services.agent import (
 from ..services.chat_history import (
     get_current_session_id,
     get_messages,
-    get_messages_for_session,
     save_message,
     start_new_session,
     delete_messages,
     delete_session,
 )
-from ..services.compactor import compact_if_needed
 
 logger = logging.getLogger(__name__)
 
@@ -83,11 +81,6 @@ async def chat_stream(body: ChatRequest):
 
     session_id = body.session_id or get_current_session_id()
 
-    try:
-        await compact_if_needed(session_id, settings)
-    except Exception:
-        logger.exception("compact_if_needed failed; continuing without compact")
-
     titles = _doc_titles(body.doc_ids)
     set_tool_context(body.doc_ids, settings, titles)
 
@@ -100,8 +93,10 @@ async def chat_stream(body: ChatRequest):
             agent = await get_document_agent()
             config = {
                 "configurable": {
-                    # thread_id is per global session → AsyncSqliteSaver replays
-                    # the full conversation on resume, independent of doc scope.
+                    # thread_id is per global session → AsyncSqliteSaver is the
+                    # agent's memory: it replays the full conversation on resume,
+                    # independent of doc scope. The pre_model_hook caps what the
+                    # model actually sees to the last MAX_RECENT_TURNS turns.
                     "thread_id": f"session-{session_id}",
                 },
                 "run_name": "document-chat",
@@ -112,12 +107,10 @@ async def chat_stream(body: ChatRequest):
                 "tags": ["ai-agent-chatbot"],
             }
 
-            prior = get_messages_for_session(session_id)
+            # Only the new question is sent; prior turns live in the checkpointer
+            # (no manual prior-injection → no double-feeding the conversation).
             stream_input = {
-                "messages": [
-                    *[{"role": m["role"], "content": m["content"]} for m in prior],
-                    {"role": "user", "content": body.question},
-                ],
+                "messages": [{"role": "user", "content": body.question}],
             }
 
             async for chunk in agent.astream_events(

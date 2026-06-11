@@ -64,20 +64,13 @@ _MIGRATIONS = [
     PRIMARY KEY (doc_id, unit_id)
 )""",
     "CREATE INDEX IF NOT EXISTS idx_doc_embeddings_doc ON document_embeddings(doc_id)",
-    # Recreate chat_messages to allow role='summary' for compacted history rows.
-    # SQLite does not support ALTER COLUMN, so we rename + recreate.
-    """CREATE TABLE IF NOT EXISTS chat_messages_v2 (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    doc_id TEXT NOT NULL,
-    session_id INTEGER NOT NULL DEFAULT 1,
-    role TEXT NOT NULL CHECK(role IN ('user', 'assistant', 'summary')),
-    content TEXT NOT NULL,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-)""",
-    "INSERT OR IGNORE INTO chat_messages_v2 SELECT * FROM chat_messages WHERE role IN ('user','assistant')",
-    "DROP TABLE IF EXISTS chat_messages",
-    "ALTER TABLE chat_messages_v2 RENAME TO chat_messages",
-    "CREATE INDEX IF NOT EXISTS idx_chat_messages_doc_id ON chat_messages(doc_id)",
+    # NOTE: the 'summary' role + nullable-doc_id table rebuild used to live here
+    # as four destructive statements (CREATE _v2 / INSERT / DROP / RENAME). That
+    # was a bug: _MIGRATIONS runs on EVERY startup, so on each restart it
+    # recreated chat_messages_v2 (with doc_id NOT NULL) and renamed it over the
+    # nullable table produced by guarded migration 0003 — reverting the schema
+    # and breaking save_message() (which inserts without doc_id). The rebuild
+    # now lives entirely in _GUARDED_MIGRATIONS (0003 + 0004), which run once.
 ]
 
 # Guarded migrations: run exactly once, tracked in schema_migrations.
@@ -110,6 +103,29 @@ _GUARDED_MIGRATIONS: list[tuple[str, list[str]]] = [
                FROM chat_messages cm""",
             "DROP TABLE chat_messages",
             "ALTER TABLE chat_messages_v3 RENAME TO chat_messages",
+            "CREATE INDEX IF NOT EXISTS idx_chat_messages_session ON chat_messages(session_id)",
+        ],
+    ),
+    (
+        # Repair DBs corrupted by the old destructive _MIGRATIONS rebuild loop:
+        # 0003 had already run (and is marked applied, so it never re-runs), yet
+        # a later restart reverted doc_id back to NOT NULL. Rebuild once more
+        # with doc_id nullable, preserving rows and ids. Idempotent for healthy
+        # DBs (they are simply rebuilt to the identical schema).
+        "0004_repair_doc_id_nullable",
+        [
+            """CREATE TABLE chat_messages_v4 (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                doc_id TEXT,
+                session_id INTEGER NOT NULL DEFAULT 1,
+                role TEXT NOT NULL CHECK(role IN ('user', 'assistant', 'summary')),
+                content TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )""",
+            """INSERT INTO chat_messages_v4 (id, doc_id, session_id, role, content, created_at)
+               SELECT id, doc_id, session_id, role, content, created_at FROM chat_messages""",
+            "DROP TABLE chat_messages",
+            "ALTER TABLE chat_messages_v4 RENAME TO chat_messages",
             "CREATE INDEX IF NOT EXISTS idx_chat_messages_session ON chat_messages(session_id)",
         ],
     ),

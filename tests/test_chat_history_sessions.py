@@ -25,6 +25,23 @@ def test_chat_messages_doc_id_is_nullable_after_migration(db):
     assert info["doc_id"][3] == 0
 
 
+def test_doc_id_stays_nullable_across_restarts(db):
+    """Regression: a destructive table rebuild placed in the always-run
+    _MIGRATIONS list reverted doc_id back to NOT NULL on every subsequent
+    init_db() (i.e. every app restart), because the one-time guarded migration
+    that made it nullable never re-runs. save_message() inserts WITHOUT a
+    doc_id, so once reverted every save raised IntegrityError and was swallowed
+    -> the UI silently stopped persisting chat."""
+    # fixture already ran init_db() once; simulate two more app restarts.
+    database.init_db()
+    database.init_db()
+    info = _cols(db, "chat_messages")
+    assert info["doc_id"][3] == 0, "doc_id reverted to NOT NULL after restart"
+    # save_message inserts without doc_id — must still succeed after restarts.
+    ch.save_message(1, "user", "persists?")
+    assert [m["content"] for m in ch.get_messages()] == ["persists?"]
+
+
 def test_global_session_ids_do_not_collide_across_docs(db):
     # Two docs that historically each had session_id=1 must be re-numbered
     # to distinct global ids by the migration.

@@ -447,6 +447,30 @@ async def close_checkpointer() -> None:
     _checkpointer = None
 
 
+# Conversation window: the checkpointer is the agent's full memory, but we only
+# feed the model the last MAX_RECENT_TURNS user turns to bound token usage.
+MAX_RECENT_TURNS = 10
+
+
+def _trim_to_recent_turns(state: dict) -> dict:
+    """pre_model_hook: cap the model's view to the last MAX_RECENT_TURNS turns.
+
+    Returns ``llm_input_messages`` (not ``messages``), so the persisted
+    checkpoint history is left intact — only what the LLM sees this step is
+    trimmed. The window always starts on a HumanMessage, which keeps any
+    AIMessage(tool_calls=…)/ToolMessage sequence whole (a ToolMessage is never
+    orphaned at the head of the window).
+    """
+    messages = state["messages"]
+    human_positions = [
+        i for i, m in enumerate(messages) if isinstance(m, HumanMessage)
+    ]
+    if len(human_positions) <= MAX_RECENT_TURNS:
+        return {"llm_input_messages": messages}
+    start = human_positions[-MAX_RECENT_TURNS]
+    return {"llm_input_messages": messages[start:]}
+
+
 async def get_document_agent() -> CompiledStateGraph:
     """Get or create the singleton ReAct agent."""
     global _agent
@@ -463,6 +487,7 @@ async def get_document_agent() -> CompiledStateGraph:
         tools=[retrieve_context, read_image, preview_edit, apply_edit],
         prompt=_build_system_prompt(),
         checkpointer=checkpointer,
+        pre_model_hook=_trim_to_recent_turns,
     )
     return _agent
 
