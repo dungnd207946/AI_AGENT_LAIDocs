@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect, useCallback, useMemo } from "react";
-import { streamChat, getChatHistory, startNewSession, clearChatHistory } from "../lib/sidecar";
+import { streamChat, getChatHistory, startNewSession, clearChatHistory, deleteSession } from "../lib/sidecar";
 import MarkdownPreview from "./MarkdownPreview";
 
 interface Message {
@@ -35,6 +35,27 @@ const IconSend = () => (
 const IconPlus = () => (
   <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
     <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
+  </svg>
+);
+
+const IconChevronDown = () => (
+  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <polyline points="6 9 12 15 18 9"/>
+  </svg>
+);
+
+const IconTrashSmall = () => (
+  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+    <polyline points="3 6 5 6 21 6"/>
+    <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/>
+    <path d="M10 11v6"/><path d="M14 11v6"/>
+    <path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/>
+  </svg>
+);
+
+const IconChat = () => (
+  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
   </svg>
 );
 
@@ -104,8 +125,10 @@ export default function ChatPanel({ docId, onClose, onDocumentEdited }: ChatPane
   const [streaming, setStreaming] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [sessionId, setSessionId] = useState<number>(1);
+  const [sessionMenuOpen, setSessionMenuOpen] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  const sessionMenuRef = useRef<HTMLDivElement>(null);
 
   // Show one conversation at a time: only the active session's messages.
   const visibleMessages = useMemo(
@@ -131,6 +154,35 @@ export default function ChatPanel({ docId, onClose, onDocumentEdited }: ChatPane
     },
     [messages],
   );
+
+  // Close the session menu on outside click
+  useEffect(() => {
+    if (!sessionMenuOpen) return;
+    const onDown = (e: MouseEvent) => {
+      if (sessionMenuRef.current && !sessionMenuRef.current.contains(e.target as Node)) {
+        setSessionMenuOpen(false);
+      }
+    };
+    window.addEventListener("mousedown", onDown);
+    return () => window.removeEventListener("mousedown", onDown);
+  }, [sessionMenuOpen]);
+
+  // Delete a single session; if it was active, fall back to another one.
+  const handleDeleteSession = useCallback(async (sid: number) => {
+    try {
+      await deleteSession(docId, sid);
+      const remaining = messages
+        .map((m) => m.sessionId ?? 1)
+        .filter((id) => id !== sid);
+      setMessages((prev) => prev.filter((m) => (m.sessionId ?? 1) !== sid));
+      if (sid === sessionId) {
+        const next = remaining.length ? Math.max(...remaining) : 1;
+        setSessionId(next);
+      }
+    } catch (e) {
+      setError(String(e));
+    }
+  }, [docId, sessionId, messages]);
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
@@ -219,7 +271,7 @@ export default function ChatPanel({ docId, onClose, onDocumentEdited }: ChatPane
           </span>
         </div>
         <div className="flex gap-1">
-          <button
+          {/* <button
             onClick={async () => {
               try {
                 await clearChatHistory(docId);
@@ -234,32 +286,84 @@ export default function ChatPanel({ docId, onClose, onDocumentEdited }: ChatPane
             className="btn-icon"
           >
             <IconTrash />
-          </button>
+          </button> */}
           <button onClick={onClose} title="Close chat" className="btn-icon">
             <IconX />
           </button>
         </div>
       </div>
 
-      {/* Session switcher — resume any past conversation */}
-      {sessionList.length > 1 && (
-        <div className="flex items-center gap-2 px-4 py-2 border-b border-[var(--border)] shrink-0 bg-[var(--surface-glass)] backdrop-blur-md z-10">
-          <span className="text-[10px] uppercase tracking-wide text-[var(--text-faint)] shrink-0">
-            Conversation
-          </span>
-          <select
-            value={sessionId}
-            onChange={(e) => setSessionId(Number(e.target.value))}
+      {/* Session switcher — always visible; resume or delete any conversation */}
+      <div className="flex items-center gap-2.5 px-4 py-2.5 border-b border-[var(--border)] shrink-0 bg-[var(--surface-glass)] backdrop-blur-md z-20">
+        <span className="text-[10px] font-medium uppercase tracking-wider text-[var(--text-faint)] shrink-0">
+          Conversation
+        </span>
+
+        {/* Custom dropdown */}
+        <div ref={sessionMenuRef} className="relative flex-1 min-w-0">
+          <button
+            type="button"
+            onClick={() => setSessionMenuOpen((v) => !v)}
             disabled={streaming}
-            title="Switch to a previous conversation"
-            className="flex-1 min-w-0 bg-[var(--surface-alt)] border border-[var(--border-strong)] rounded-lg text-[12px] text-[var(--text-primary)] px-2 py-1 outline-none focus:border-[var(--accent)] cursor-pointer disabled:opacity-50"
+            aria-haspopup="listbox"
+            aria-expanded={sessionMenuOpen}
+            title="Switch or delete a conversation"
+            className="w-full flex items-center gap-2 bg-[var(--surface-alt)] border border-[var(--border-strong)] rounded-lg text-[12px] text-[var(--text-primary)] pl-2.5 pr-2 py-1.5 outline-none hover:border-[var(--border-hover)] focus-visible:border-[var(--accent)] focus-visible:ring-2 focus-visible:ring-[var(--accent-subtle)] transition-all cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
           >
-            {sessionList.map((sid) => (
-              <option key={sid} value={sid}>{sessionLabel(sid)}</option>
-            ))}
-          </select>
+            <span className="text-[var(--accent-text)] shrink-0 flex"><IconChat /></span>
+            <span className="flex-1 min-w-0 truncate text-left">{sessionLabel(sessionId)}</span>
+            <span
+              className="text-[var(--text-faint)] shrink-0 flex transition-transform duration-200"
+              style={{ transform: sessionMenuOpen ? "rotate(180deg)" : "rotate(0deg)" }}
+            >
+              <IconChevronDown />
+            </span>
+          </button>
+
+          {sessionMenuOpen && (
+            <div
+              role="listbox"
+              className="absolute left-0 right-0 top-[calc(100%+6px)] z-30 max-h-72 overflow-y-auto rounded-xl border border-[var(--border-strong)] bg-[var(--surface)] shadow-2xl shadow-black/40 p-1.5 scale-in origin-top"
+            >
+              {[...sessionList].reverse().map((sid) => {
+                const isActive = sid === sessionId;
+                return (
+                  <div
+                    key={sid}
+                    role="option"
+                    aria-selected={isActive}
+                    onClick={() => { setSessionId(sid); setSessionMenuOpen(false); }}
+                    className={`group flex items-center gap-2 rounded-lg pl-2.5 pr-1.5 py-2 cursor-pointer transition-colors ${
+                      isActive
+                        ? "bg-[var(--accent-subtle)] text-[var(--text-primary)]"
+                        : "text-[var(--text-secondary)] hover:bg-[var(--surface-hover)]"
+                    }`}
+                  >
+                    <span
+                      className={`w-1.5 h-1.5 rounded-full shrink-0 ${
+                        isActive ? "bg-[var(--accent)] shadow-[0_0_6px_var(--accent-glow)]" : "bg-transparent"
+                      }`}
+                    />
+                    <span className="flex-1 min-w-0 truncate text-[12px] leading-snug">
+                      {sessionLabel(sid)}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={(e) => { e.stopPropagation(); handleDeleteSession(sid); }}
+                      disabled={streaming}
+                      title="Delete this conversation"
+                      aria-label="Delete this conversation"
+                      className="shrink-0 w-7 h-7 -mr-0.5 rounded-md flex items-center justify-center text-[var(--text-faint)] opacity-0 group-hover:opacity-100 focus:opacity-100 hover:bg-[var(--error-bg)] hover:text-[var(--error)] transition-all disabled:opacity-30 disabled:cursor-not-allowed"
+                    >
+                      <IconTrashSmall />
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+          )}
         </div>
-      )}
+      </div>
 
       {/* Messages */}
       <div ref={scrollRef} className="flex-1 overflow-y-auto p-4 flex flex-col gap-5 pb-40">
