@@ -80,6 +80,41 @@ _MIGRATIONS = [
     "CREATE INDEX IF NOT EXISTS idx_chat_messages_doc_id ON chat_messages(doc_id)",
 ]
 
+# Guarded migrations: run exactly once, tracked in schema_migrations.
+# Use this (not the _MIGRATIONS list) for destructive/idempotency-sensitive
+# changes such as table rebuilds.
+_GUARDED_MIGRATIONS: list[tuple[str, list[str]]] = [
+    (
+        "0003_global_sessions",
+        [
+            # Rebuild chat_messages: doc_id becomes nullable (provenance only,
+            # no longer a key) and session_id is globalised so ids never
+            # collide across documents.
+            """CREATE TABLE chat_messages_v3 (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                doc_id TEXT,
+                session_id INTEGER NOT NULL DEFAULT 1,
+                role TEXT NOT NULL CHECK(role IN ('user', 'assistant', 'summary')),
+                content TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )""",
+            # Globalise: rank each distinct (doc_id, session_id) pair to a new
+            # contiguous id, ordered by (doc_id, session_id). Correlated
+            # subquery avoids window-function portability concerns.
+            """INSERT INTO chat_messages_v3 (id, doc_id, session_id, role, content, created_at)
+               SELECT cm.id, cm.doc_id,
+                 (SELECT COUNT(*) FROM (SELECT DISTINCT doc_id, session_id FROM chat_messages) d
+                  WHERE (d.doc_id < cm.doc_id)
+                     OR (d.doc_id = cm.doc_id AND d.session_id <= cm.session_id)) AS new_sid,
+                 cm.role, cm.content, cm.created_at
+               FROM chat_messages cm""",
+            "DROP TABLE chat_messages",
+            "ALTER TABLE chat_messages_v3 RENAME TO chat_messages",
+            "CREATE INDEX IF NOT EXISTS idx_chat_messages_session ON chat_messages(session_id)",
+        ],
+    ),
+]
+
 
 def init_db() -> None:
     """Create DB file and all tables if they do not exist yet."""
@@ -88,12 +123,32 @@ def init_db() -> None:
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA foreign_keys=ON")
         conn.executescript(_SCHEMA)
-        # Run migrations (ignore errors for already-applied ones)
+        # Run lightweight migrations (ignore errors for already-applied ones)
         for migration in _MIGRATIONS:
             try:
                 conn.execute(migration)
             except sqlite3.OperationalError:
                 pass  # column already exists or table already recreated
+        _run_guarded_migrations(conn)
+        conn.commit()
+
+
+def _run_guarded_migrations(conn: sqlite3.Connection) -> None:
+    """Run each guarded migration exactly once, tracked in schema_migrations."""
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS schema_migrations ("
+        "name TEXT PRIMARY KEY, applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)"
+    )
+    applied = {
+        row[0]
+        for row in conn.execute("SELECT name FROM schema_migrations").fetchall()
+    }
+    for name, statements in _GUARDED_MIGRATIONS:
+        if name in applied:
+            continue
+        for stmt in statements:
+            conn.execute(stmt)
+        conn.execute("INSERT INTO schema_migrations (name) VALUES (?)", (name,))
 
 
 # ---------------------------------------------------------------------------
