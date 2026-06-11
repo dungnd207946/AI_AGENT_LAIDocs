@@ -25,6 +25,7 @@ import logging
 import re
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 import aiosqlite
 from langchain_core.messages import HumanMessage
@@ -36,6 +37,7 @@ from langgraph.prebuilt import create_react_agent
 from ..core.config import Settings, get_settings, LAIDOCS_HOME
 from ..core.database import get_db
 from ..core.vault import ensure_assets_dir
+from ..services.chat_history import create_markdown_export, get_messages
 from ..services.document_store import persist_document_content
 from .llm import create_chat_model
 from . import retrieval
@@ -106,9 +108,71 @@ change and asks for confirmation. NEVER apply without user approval.
 - `old_string` must come from `retrieve_context` or `preview_edit` — never invent text.
 - **Delete** = pass an empty `new_string`. **Add** = use an existing passage as anchor.
 
+## Generating markdown exports
+When the user requests to export/save/download content as Markdown, use `create_markdown_file`.
+
+**IMPORTANT: You MUST distinguish between two VERY DIFFERENT scenarios:**
+
+### Scenario A: User wants to export your EXISTING response
+User says phrases like:
+- "Export that response"
+- "Save this conversation"  
+- "Download your last answer"
+- "Xuất câu trả lời đó"
+
+→ Call `create_markdown_file()` with NO arguments.
+→ The tool automatically uses your most recent reply.
+
+### Scenario B: User wants you to CREATE NEW content THEN export
+User says phrases like:
+- "Tóm tắt và xuất file" (Summarize and export)
+- "Dịch và xuất file" (Translate and export)
+- "Phân tích và xuất file" (Analyze and export)
+- "Tạo báo cáo và xuất file" (Create report and export)
+- "Viết tóm tắt phần X và xuất file" (Write summary of section X and export)
+
+**For Scenario B, you MUST follow this EXACT process:**
+
+**STEP 1: READ the document**
+- Call `retrieve_context(question="nội dung cần tóm tắt/dịch/phân tích")`
+
+**STEP 2: CREATE the content**
+- Based on the retrieved context, write a REAL summary/translation/analysis
+- The content should be DETAILED, not just a phrase
+- Example: "Phần 2.1 trình bày về... Bao gồm các nội dung chính: ..."
+
+**STEP 3: Show the content to user**
+- Output the content you created
+
+**STEP 4: Export it**
+- Call `create_markdown_file(content=<the_content_you_created>)`
+
+**NEVER just write "Tóm tắt nội dung phần X" as the content. That is NOT a real summary!**
+
+### Examples:
+
+**CORRECT - Real summary:**
+User: "Tóm tắt nội dung phần 2.1 và xuất file"
+Assistant: [Calls retrieve_context(question="nội dung phần 2.1")]
+Assistant: "Dựa vào nội dung phần 2.1, đây là bản tóm tắt:
+- Điểm thứ nhất: ...
+- Điểm thứ hai: ...
+- Kết luận: ..."
+Assistant: [Calls create_markdown_file(content="Dựa vào nội dung phần 2.1, đây là bản tóm tắt:\n- Điểm thứ nhất: ...\n- Điểm thứ hai: ...\n- Kết luận: ...")]
+Assistant: "✅ Xuất file thành công! Tải tại: http://..."
+
+**WRONG - Just a placeholder:**
+User: "Tóm tắt nội dung phần 2.1 và xuất file"
+Assistant: [Calls create_markdown_file()] ← WRONG! No content created.
+Assistant: "Tóm tắt nội dung phần 2.1" ← WRONG! That's not a real summary!
+
+**The content you export MUST be the ACTUAL summary/translation/analysis, not just a description of what you're going to do.**
+
 ## Response Style
 - Be concise and well-structured (use headers, bullets, bold for key terms)
 - Match the user's language (if they ask in Vietnamese, answer in Vietnamese)
+- Match the user's language. If the user asks in Vietnamese, answer in Vietnamese and generate any exported markdown content in Vietnamese.
+- Do not switch to English for a Vietnamese request unless the user explicitly asks for English.
 - When the document is ambiguous, present multiple interpretations clearly
 """
 
@@ -375,6 +439,83 @@ async def apply_edit(old_string: str, new_string: str) -> str:
     return "Edit applied successfully. The document has been updated."
 
 
+@tool
+def create_markdown_file(filename: str | None = None, content: str | None = None) -> str:
+    """Create a downloadable Markdown file from provided content OR latest assistant reply.
+
+    Use this tool when the user requests ANY export operation (markdown, report, summary, etc.).
+    
+    BEHAVIOR:
+    - If `content` is provided: Saves EXACTLY that text
+    - If `content` is None: Automatically uses the MOST RECENT assistant reply from chat history
+    
+    This means you can call this tool WITHOUT generating new content when:
+    - User says "export that last response as markdown"
+    - User says "save this conversation" (will save your last reply)
+    - User just wants to download what you already said
+    
+    WORKFLOW - WITH new content (summary/translation):
+        1. Generate the content
+        2. Call create_markdown_file(content=<generated_text>)
+        3. Return download link
+    
+    WORKFLOW - WITHOUT new content (just export):
+        1. Call create_markdown_file()  # content=None automatically
+        2. Return download link
+    
+    Args:
+        filename: Optional custom name (e.g., "my-report", "summary"). 
+        content: Text to save. If None, uses latest assistant reply from chat history.
+    
+    Returns:
+        Success message with download URL to the saved file.
+        Using format returned by the tool allows the agent to include the answer 
+    """
+    ctx = _tool_context_var.get()
+    doc_id = ctx.get("doc_id", "")
+    if not doc_id:
+        return "Error: Document context not configured."
+
+    try:
+        export_path = create_markdown_export(doc_id, filename=filename, content=content)
+        
+        # Determine what content was saved
+        if content is None:
+            # Content was auto-fetched from chat history
+            messages = get_messages(doc_id)
+            assistant_messages = [msg for msg in messages if msg.get("role") == "assistant"]
+            if not assistant_messages:
+                return "Error: No assistant replies found in chat history to export."
+            saved_content = assistant_messages[-1].get("content", "")
+            source_note = " (exported from latest assistant reply)"
+        else:
+            saved_content = content
+            source_note = ""
+        
+        # Check for empty content
+        if not saved_content or not saved_content.strip():
+            return "Error: Cannot export empty content. No text available to save."
+        
+        settings = get_settings()
+        base_url = f"http://127.0.0.1:{settings.port}"
+        full_url = f"{base_url}/download/{quote(export_path.name)}"
+        
+        # Thêm preview nội dung (300 ký tự đầu)
+        content_preview = saved_content.strip()
+        if len(content_preview) > 300:
+            content_preview = content_preview[:300] + "..."
+        
+        return (
+            f"✅ Xuất file thành công{source_note}!\n\n"
+            f"**Download link:** {full_url}\n\n"
+            f"**File name:** `{export_path.name}`\n\n"
+            f"**Nội dung xem trước:**\n{content_preview}\n\n"
+        )
+    except ValueError as ve:
+        return f"Error: {ve}"
+    except Exception as exc:
+        return f"Error creating markdown file: {exc}"
+
 # ---------------------------------------------------------------------------
 # Memory helpers
 # ---------------------------------------------------------------------------
@@ -448,8 +589,8 @@ async def get_document_agent() -> CompiledStateGraph:
 
     _agent = create_react_agent(
         model=model,
-        tools=[retrieve_context, read_image, preview_edit, apply_edit],
-        prompt=_build_system_prompt(),
+        tools=[retrieve_context, read_image, preview_edit, apply_edit, create_markdown_file],
+        prompt=-_build_system_prompt(),
         checkpointer=checkpointer,
     )
     return _agent

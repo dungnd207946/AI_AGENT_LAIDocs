@@ -41,7 +41,7 @@ export default function MarkdownPreview({ content, compact }: MarkdownPreviewPro
             </p>
           ),
           a: ({ href, children }) => (
-            <a href={href} style={{ color: "var(--accent-text)", textDecoration: "underline", textUnderlineOffset: 3, transition: "opacity 0.15s" }} target="_blank" rel="noopener noreferrer">
+            <a href={href} style={{ color: "var(--accent-text)", textDecoration: "underline", textUnderlineOffset: 3, transition: "opacity 0.15s" }} target="_blank" rel="noopener noreferrer" download={href?.endsWith(".md")}>
               {children}
             </a>
           ),
