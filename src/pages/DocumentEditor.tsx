@@ -502,23 +502,23 @@ export default function DocumentEditor() {
           />
         </div>
 
-        {/* Chat drawer — overlay on the right, resizable */}
+        {/* Chat drawer — docked on the right, pushes the editor, resizable */}
         {showChat && id && (
           <div
             ref={chatContainerRef}
             onAnimationEnd={() => { chatHasAnimated.current = true; }}
             style={{
-              position: "absolute",
-              top: 0,
-              right: 0,
-              bottom: 0,
+              position: "relative",
+              flexShrink: 0,
               width: chatWidth,
+              height: "100%",
               zIndex: 20,
               borderLeft: "1px solid var(--border-strong)",
-              boxShadow: "-8px 0 30px rgba(0, 0, 0, 0.35), -2px 0 8px rgba(0, 0, 0, 0.2)",
+              boxShadow: "-2px 0 8px rgba(0, 0, 0, 0.12)",
               animation: chatHasAnimated.current ? undefined : "slideInRight 0.28s cubic-bezier(0.22, 1, 0.36, 1) both",
               overflow: "hidden",
               display: "flex",
+              background: "var(--surface)",
             }}
           >
             {/* Drag handle */}

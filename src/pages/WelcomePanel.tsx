@@ -253,7 +253,7 @@ export default function WelcomePanel() {
             animationDelay: "0.06s",
           }}
         >
-          Welcome to LAIDocs
+          Welcome to Docs Agent 
         </h1>
 
         <p
@@ -267,7 +267,7 @@ export default function WelcomePanel() {
             animationDelay: "0.12s",
           }}
         >
-          Your intelligent knowledge base. Upload documents, crawl web pages, and chat with your content using AI.
+          Your intelligent knowledge base. Upload documents and chat with your content using AI.
         </p>
 
         {/* Action Buttons */}
@@ -283,13 +283,13 @@ export default function WelcomePanel() {
             Upload File
           </button>
 
-          <button
+          {/* <button
             onClick={() => setShowCrawl(true)}
             className="btn-ghost"
           >
             <IconGlobe />
             Crawl URL
-          </button>
+          </button> */}
         </div>
 
         {/* Section divider with label */}
@@ -320,9 +320,9 @@ export default function WelcomePanel() {
         {/* Technology showcase cards */}
         <div style={{
           display: "grid",
-          gridTemplateColumns: "repeat(3, 1fr)",
+          gridTemplateColumns: "repeat(2, 1fr)",
           gap: 12,
-          width: "100%",
+          width: "80%",
           textAlign: "left",
         }}>
           <TechCard
@@ -334,7 +334,7 @@ export default function WelcomePanel() {
             accentColor="#34d399"
             delay={260}
           />
-          <TechCard
+          {/* <TechCard
             icon={<IconWeb />}
             label="Web Engine"
             headline="Intelligent Web Crawling"
@@ -342,7 +342,7 @@ export default function WelcomePanel() {
             techStack={["Crawl4AI"]}
             accentColor="#a5b4fc"
             delay={320}
-          />
+          /> */}
           <TechCard
             icon={<IconMessageAI />}
             label="Chat Engine"
@@ -384,7 +384,7 @@ export default function WelcomePanel() {
               v1.0
             </span>
           </div>
-          <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
+          {/* <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="var(--text-faint)" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
               <rect x="2" y="4" width="20" height="16" rx="2" />
               <path d="M22 4L12 13 2 4" />
@@ -392,7 +392,7 @@ export default function WelcomePanel() {
             <span style={{ fontSize: 11, color: "var(--text-faint)", letterSpacing: "0.2px" }}>
               ngohongthai.uet@gmail.com
             </span>
-          </div>
+          </div> */}
         </div>
       </div>
 
