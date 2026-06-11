@@ -196,14 +196,15 @@ def build_context_from_units(units: list[dict]) -> str:
     for u in units:
         kind = u.get("kind", "text")
         title = u.get("title") or "Section"
-        uid = u.get("unit_id", "?")
+        uid = str(u.get("unit_id", "?")).split("::")[-1]  # strip doc namespace
         text = u.get("text", "")
+        src = f"File: {u['doc_title']} | " if u.get("doc_title") else ""
         if kind == "image":
-            header = f"[Figure: {title} ({uid})]"
+            header = f"[{src}Figure: {title} ({uid})]"
         elif kind == "table":
-            header = f"[Table: {title} ({uid})]"
+            header = f"[{src}Table: {title} ({uid})]"
         else:
-            header = f"[Section: {title} (node {uid})]"
+            header = f"[{src}Section: {title} (node {uid})]"
         section = f"{header}\n{text}\n\n"
         if len(ctx) + len(section) > MAX_CONTEXT_CHARS:
             break
@@ -554,6 +555,148 @@ def hybrid_rank(
 
 
 # ---------------------------------------------------------------------------
+# Multi-document retrieval — scope = several selected docs ranked as one pool
+# ---------------------------------------------------------------------------
+# Reuses the single-doc primitives above; only ADDS list-aware wrappers so the
+# existing single-doc functions and the agent's retrieval contract are intact.
+
+_NS_SEP = "::"  # namespaces unit ids across docs: f"{doc_id}::{unit_id}"
+
+
+def _doc_title(doc_id: str) -> str:
+    """Human-readable title for a doc (title → filename → id)."""
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT COALESCE(title, filename, id) FROM documents WHERE id=?",
+            (doc_id,),
+        ).fetchone()
+    return row[0] if row and row[0] else doc_id
+
+
+def get_retrieval_units_multi(doc_ids: list[str]) -> list[dict]:
+    """Pool retrieval units from several docs into one corpus.
+
+    Calls the single-doc get_retrieval_units() per document, namespaces each
+    unit_id as f"{doc_id}::{unit_id}" (so ids never collide across docs), and
+    tags each unit with its source doc_id + doc_title for citation + edit.
+    """
+    pooled: list[dict] = []
+    for doc_id in doc_ids:
+        title = _doc_title(doc_id)
+        for u in get_retrieval_units(doc_id):
+            pooled.append({
+                **u,
+                "unit_id": f"{doc_id}{_NS_SEP}{u['unit_id']}",
+                "doc_id": doc_id,
+                "doc_title": title,
+            })
+    return pooled
+
+
+def dense_search_multi(
+    doc_ids: list[str],
+    question: str,
+    settings: Settings,
+    units: list[dict] | None = None,
+    top_k: int = _PER_RETRIEVER_TOP_K,
+) -> list[str]:
+    """Dense search across several docs → namespaced unit_ids.
+
+    Cosine scores live in one shared embedding space, so a single global sort
+    across all docs is correct. Ensures each doc's index exists (lazily) using
+    its slice of the pooled units (de-namespaced for indexing).
+    """
+    cfg = settings.active_llm
+    if not embeddings_supported(cfg):
+        return []
+
+    per_doc_units: dict[str, list[dict]] = {}
+    for u in (units or []):
+        bare = {**u, "unit_id": u["unit_id"].split(_NS_SEP, 1)[-1]}
+        per_doc_units.setdefault(u.get("doc_id", ""), []).append(bare)
+    for doc_id in doc_ids:
+        ensure_embedding_index(doc_id, settings, units=per_doc_units.get(doc_id))
+
+    import numpy as np
+
+    embedder = create_embeddings(cfg)
+    q = np.asarray(embedder.embed_query(question), dtype=np.float32)
+    qn = q / (np.linalg.norm(q) + 1e-8)
+
+    placeholders = ",".join("?" * len(doc_ids))
+    with get_db() as conn:
+        rows = conn.execute(
+            f"SELECT doc_id, unit_id, vector FROM document_embeddings "
+            f"WHERE doc_id IN ({placeholders})",
+            tuple(doc_ids),
+        ).fetchall()
+    if not rows:
+        return []
+
+    scored: list[tuple[str, float]] = []
+    for doc_id, unit_id, blob in rows:
+        v = np.frombuffer(blob, dtype=np.float32)
+        if v.shape != qn.shape:
+            continue
+        score = float(qn @ (v / (np.linalg.norm(v) + 1e-8)))
+        scored.append((f"{doc_id}{_NS_SEP}{unit_id}", score))
+
+    scored.sort(key=lambda x: x[1], reverse=True)
+    return [uid for uid, _ in scored[:top_k]]
+
+
+def hybrid_rank_multi(
+    doc_ids: list[str],
+    question: str,
+    settings: Settings,
+    units: list[dict] | None = None,
+) -> tuple[list[str], list[str] | None]:
+    """Rank pooled units across docs by fusing tree + BM25 + dense (one RRF).
+
+    Returns ``(fused_namespaced_unit_ids, tree_selected)`` where tree_selected
+    is the concatenated per-doc tree selection (``[]`` = trees existed but
+    chose nothing → out-of-scope signal; ``None`` = no doc had a tree).
+    """
+    units = units if units is not None else get_retrieval_units_multi(doc_ids)
+    if not units:
+        return [], None
+
+    ranked_lists: list[list[str]] = []
+
+    any_tree = False
+    tree_selected: list[str] = []
+    for doc_id in doc_ids:
+        tree = get_tree_index(doc_id)
+        if tree and tree.get("structure"):
+            any_tree = True
+            try:
+                for nid in select_node_ids(tree, question, settings):
+                    tree_selected.append(f"{doc_id}{_NS_SEP}{nid}")
+            except Exception:
+                logger.exception("Tree node selection failed for doc %s", doc_id)
+    if tree_selected:
+        ranked_lists.append(tree_selected)
+
+    try:
+        bm = bm25_search(doc_ids[0], question, units=units)  # doc_id unused (units given)
+        if bm:
+            ranked_lists.append(bm)
+    except Exception:
+        logger.exception("BM25 retrieval failed for docs %s", doc_ids)
+
+    try:
+        dense = dense_search_multi(doc_ids, question, settings, units=units)
+        if dense:
+            ranked_lists.append(dense)
+    except Exception:
+        logger.exception("Dense retrieval failed for docs %s", doc_ids)
+
+    if not ranked_lists:
+        return [], (tree_selected if any_tree else None)
+    return rrf_fuse(ranked_lists), (tree_selected if any_tree else None)
+
+
+# ---------------------------------------------------------------------------
 # Full hybrid retrieval pipeline (single-shot)
 # ---------------------------------------------------------------------------
 
@@ -741,6 +884,93 @@ def agentic_retrieve_context(
         # Nothing from any retriever — fall back to raw content.
         content = get_document_content(doc_id)
         return content[:MAX_CONTEXT_CHARS] if content else ""
+
+    ordered = sorted(accumulated.items(), key=lambda x: x[1], reverse=True)
+    selected = [unit_map[uid] for uid, _ in ordered[:MAX_ACCUMULATED_UNITS]]
+    return build_context_from_units(selected)
+
+
+def agentic_retrieve_context_multi(
+    doc_ids: list[str],
+    question: str,
+    settings: Settings | None = None,
+    max_rounds: int = MAX_RETRIEVAL_ROUNDS,
+) -> str:
+    """Iterative multi-hop retrieval over a POOL of several documents.
+
+    Mirrors agentic_retrieve_context() but ranks all selected docs as one pool
+    via hybrid_rank_multi (units namespaced by doc). Unlike the single-doc
+    path, it never falls back to a raw whole-document dump (there is no single
+    "the document"): when nothing is retrieved it returns "" — preserving the
+    anti-hallucination contract for out-of-scope questions.
+    """
+    settings = settings or get_settings()
+    doc_ids = [d for d in doc_ids if d]
+    if not doc_ids:
+        return ""
+
+    units = get_retrieval_units_multi(doc_ids)
+    if not units:
+        return ""
+    unit_map = {u["unit_id"]: u for u in units}
+
+    # No LLM: single-shot pooled lexical/dense retrieval, no critique loop.
+    if not is_llm_configured(settings.active_llm):
+        fused, _ = hybrid_rank_multi(doc_ids, question, settings, units=units)
+        if not fused:
+            return ""
+        return build_context_from_units(
+            [unit_map[uid] for uid in fused if uid in unit_map]
+        )
+
+    accumulated: dict[str, float] = {}
+    seen_queries: set[str] = set()
+    first_round_empty_tree_only = False
+
+    queries = [question]
+    for round_idx in range(max_rounds):
+        new_units_this_round = 0
+        for q in queries:
+            qkey = q.strip().lower()
+            if not qkey or qkey in seen_queries:
+                continue
+            seen_queries.add(qkey)
+
+            fused, tree_selected = hybrid_rank_multi(doc_ids, q, settings, units=units)
+            if round_idx == 0 and q == question and not fused and tree_selected == []:
+                first_round_empty_tree_only = True
+
+            for rank, uid in enumerate(fused):
+                if uid not in unit_map:
+                    continue
+                score = 1.0 / (_RRF_K + rank + 1)
+                if uid not in accumulated:
+                    new_units_this_round += 1
+                if score > accumulated.get(uid, 0.0):
+                    accumulated[uid] = score
+
+        if not accumulated and first_round_empty_tree_only:
+            return ""
+        if not accumulated:
+            break
+
+        ordered = sorted(accumulated.items(), key=lambda x: x[1], reverse=True)
+        selected = [unit_map[uid] for uid, _ in ordered[:MAX_ACCUMULATED_UNITS]]
+        context = build_context_from_units(selected)
+
+        if round_idx == max_rounds - 1:
+            break
+
+        verdict = _critique(question, context, settings)
+        if verdict["sufficient"] or not verdict["followups"]:
+            break
+        if new_units_this_round == 0:
+            break
+
+        queries = verdict["followups"]
+
+    if not accumulated:
+        return ""
 
     ordered = sorted(accumulated.items(), key=lambda x: x[1], reverse=True)
     selected = [unit_map[uid] for uid, _ in ordered[:MAX_ACCUMULATED_UNITS]]
