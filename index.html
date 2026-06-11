@@ -5,6 +5,12 @@
     <link rel="icon" type="image/svg+xml" href="/vite.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>LAIDocs</title>
+    <script>
+      // Apply saved theme before paint to avoid flash-of-wrong-theme
+      if (localStorage.getItem("laidocs-theme") === "light") {
+        document.documentElement.setAttribute("data-theme", "light");
+      }
+    </script>
   </head>
   <body>
     <div id="root"></div>

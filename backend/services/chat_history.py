@@ -193,3 +193,12 @@ def delete_messages(doc_id: str) -> None:
     """Delete all messages for a document (including summaries)."""
     with get_db() as conn:
         conn.execute("DELETE FROM chat_messages WHERE doc_id = ?", (doc_id,))
+
+
+def delete_session(doc_id: str, session_id: int) -> None:
+    """Delete all messages belonging to a single session of a document."""
+    with get_db() as conn:
+        conn.execute(
+            "DELETE FROM chat_messages WHERE doc_id = ? AND session_id = ?",
+            (doc_id, session_id),
+        )
