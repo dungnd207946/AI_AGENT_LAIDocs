@@ -16,6 +16,7 @@ import logging
 import re
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 from deepagents import create_deep_agent
 from deepagents.backends import StateBackend, CompositeBackend
@@ -31,6 +32,7 @@ from langgraph.store.memory import InMemoryStore
 from ..core.config import LLMConfig, Settings, get_settings, LAIDOCS_HOME
 from ..core.database import get_db
 from ..core.vault import ensure_assets_dir
+from ..services.chat_history import create_markdown_export, get_messages
 from ..services.document_store import persist_document_content
 from ..services.tree_index import find_nodes_by_ids, remove_fields
 
@@ -85,6 +87,52 @@ document-grounded); cite the image (e.g. "Image 1") in your answer.
 You CAN edit the document — but ONLY when the user explicitly asks you to change it
 (add, modify, or delete content). Editing uses two dedicated tools, NOT your filesystem tools.
 
+## Generating markdown exports
+When the user requests to export/save/download content as Markdown, use `create_markdown_file`.
+
+**Two scenarios:**
+
+### Scenario 1: Export WITHOUT generating new content
+User just wants to save what you already said:
+- "Export that as markdown"
+- "Save this response"  
+- "Download this conversation"
+
+→ Call `create_markdown_file()` with NO arguments immediately.
+→ The tool automatically uses your most recent reply from chat history.
+
+### Scenario 2: Export WITH new content
+User wants you to create NEW content and save it:
+- "Summarize and export"
+- "Translate and export"  
+- "Generate report and save"
+
+→ Generate the new content first
+→ Call `create_markdown_file(content=<your_generated_text>)`
+→ Then return the download link
+
+**CRITICAL RULES (both scenarios):**
+- DO NOT describe steps or say "I will..."
+- Call the tool IMMEDIATELY when you have/need to export
+- The request is NOT complete until the tool is called
+- ALWAYS return the download link from the tool result
+
+**Examples:**
+
+User: "Export that response"  (Scenario 1)
+Assistant: [immediately calls create_markdown_file()]
+Assistant: "✅ Export successful! Download: http://..."
+
+User: "Tóm tắt và xuất file"  (Scenario 2)
+Assistant: [generates summary in Vietnamese]
+Assistant: [calls create_markdown_file(content=<summary>)]
+Assistant: "✅ Đã xuất file thành công! Tải tại: http://..."
+
+User: "Save this as report.md"  (Scenario 1 with custom name)
+Assistant: [calls create_markdown_file(filename="report")]
+Assistant: "✅ Exported as report.md! Download: http://..."
+
+
 **Which document you edit (READ THIS FIRST):** Edits ALWAYS target the CURRENT document — \
 the very SAME one `retrieve_context` reads. There is exactly ONE document in this \
 conversation. You do NOT need, and will NOT be given, a filename or file path: the edit \
@@ -114,6 +162,8 @@ new text). Never overwrite anything beyond what the user asked for.
 ## Response Style
 - Be concise and well-structured (use headers, bullets, bold for key terms)
 - Match the user's language (if they ask in Vietnamese, answer in Vietnamese)
+- Match the user's language. If the user asks in Vietnamese, answer in Vietnamese and generate any exported markdown content in Vietnamese.
+- Do not switch to English for a Vietnamese request unless the user explicitly asks for English.
 - When the document is ambiguous, present multiple interpretations clearly
 
 ## Memory & Learning
@@ -515,6 +565,75 @@ async def apply_edit(old_string: str, new_string: str) -> str:
     return "Edit applied successfully. The document has been updated."
 
 
+@tool
+def create_markdown_file(filename: str | None = None, content: str | None = None) -> str:
+    """Create a downloadable Markdown file from provided content OR latest assistant reply.
+
+    Use this tool when the user requests ANY export operation (markdown, report, summary, etc.).
+    
+    BEHAVIOR:
+    - If `content` is provided: Saves EXACTLY that text
+    - If `content` is None: Automatically uses the MOST RECENT assistant reply from chat history
+    
+    This means you can call this tool WITHOUT generating new content when:
+    - User says "export that last response as markdown"
+    - User says "save this conversation" (will save your last reply)
+    - User just wants to download what you already said
+    
+    WORKFLOW - WITH new content (summary/translation):
+        1. Generate the content
+        2. Call create_markdown_file(content=<generated_text>)
+        3. Return download link
+    
+    WORKFLOW - WITHOUT new content (just export):
+        1. Call create_markdown_file()  # content=None automatically
+        2. Return download link
+    
+    Args:
+        filename: Optional custom name (e.g., "my-report", "summary"). 
+                 If None, generates "report-{doc_id}.md"
+        content: Text to save. If None, uses latest assistant reply from chat history.
+    
+    Returns:
+        Success message with download URL to the saved file.
+    
+    Examples:
+        # Export latest assistant reply
+        User: "Export that as markdown"
+        Assistant: [calls create_markdown_file() immediately]
+        
+        # Export new summary
+        User: "Summarize and export"
+        Assistant: [generates summary] → calls create_markdown_file(content=summary)
+        
+        # Export with custom filename
+        User: "Save as report.md"
+        Assistant: create_markdown_file(filename="report", content=None)
+    """
+    ctx = _tool_context_var.get()
+    doc_id = ctx.get("doc_id", "")
+    if not doc_id:
+        return "Error: Document context not configured."
+
+    try:
+        export_path = create_markdown_export(doc_id, filename=filename, content=content)
+        used_content = content
+        if used_content is None:
+            # If content was not explicitly provided, fall back to the latest saved assistant reply
+            messages = get_messages(doc_id)
+            assistant_messages = [msg for msg in messages if msg.get("role") == "assistant"]
+            used_content = assistant_messages[-1].get("content", "") if assistant_messages else ""
+        settings = get_settings()
+        base_url = f"http://127.0.0.1:{settings.port}"
+        full_url = f"{base_url}/download/{quote(export_path.name)}"
+        return (
+            f"Xuất file thành công. Tải file tại: {full_url}\n\n"
+            # f"Nội dung đã xuất:\n{used_content.strip()}"
+        )
+    except Exception as exc:
+        return f"Error creating markdown file: {exc}"
+
+
 # ---------------------------------------------------------------------------
 # Memory initialization
 # ---------------------------------------------------------------------------
@@ -657,7 +776,7 @@ async def get_document_agent() -> CompiledStateGraph:
 
     _agent = create_deep_agent(
         model=model,
-        tools=[retrieve_context, read_image, preview_edit, apply_edit],
+        tools=[retrieve_context, read_image, preview_edit, apply_edit, create_markdown_file],
         system_prompt=DOCUMENT_SOUL_PROMPT,
         middleware=[_current_document_prompt],
         memory=["/memories/preferences.md"],

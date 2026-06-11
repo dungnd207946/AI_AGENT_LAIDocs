@@ -7,7 +7,83 @@ which only holds the current session.
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
+import re
+import unicodedata
+from pathlib import Path
+
+from ..core.config import LAIDOCS_HOME
 from ..core.database import get_db
+
+DOWNLOADS_DIR = LAIDOCS_HOME / "downloads"
+
+
+def _ensure_downloads_dir() -> Path:
+    DOWNLOADS_DIR.mkdir(parents=True, exist_ok=True)
+    return DOWNLOADS_DIR
+
+
+def _sanitize_export_filename(filename: str) -> str:
+    filename = Path(filename).name
+    if filename.lower().endswith(".md"):
+        stem = filename[:-3]
+    else:
+        stem = filename
+    stem = stem.strip()
+    stem = re.sub(r"[\\/:*?\"<>|]+", "-", stem)
+    stem = re.sub(r"\s+", " ", stem).strip()
+    if not stem:
+        stem = "report"
+    return f"{stem}.md"
+
+
+def create_markdown_export(doc_id: str, filename: str | None = None, content: str | None = None) -> Path:
+    """Build a Markdown file from the latest assistant reply or provided content."""
+    if content is None:
+        messages = get_messages(doc_id)
+        if not messages:
+            raise ValueError(f"No chat history found for doc_id {doc_id}")
+
+        assistant_messages = [msg for msg in messages if msg.get("role") == "assistant"]
+        if not assistant_messages:
+            raise ValueError(f"No assistant reply found for doc_id {doc_id}")
+
+        content = assistant_messages[-1].get("content", "")
+
+    content = (content or "").strip()
+    if not content:
+        raise ValueError("Cannot export empty content.")
+
+    if filename:
+        filename = _sanitize_export_filename(filename)
+    else:
+        filename = f"report-{doc_id}.md"
+
+    export_dir = _ensure_downloads_dir()
+    export_path = export_dir / filename
+    base_name = export_path.stem
+    suffix = export_path.suffix
+    counter = 1
+    while export_path.exists():
+        export_path = export_dir / f"{base_name}-{counter}{suffix}"
+        counter += 1
+
+    export_path.write_text(_build_export_content(doc_id, content), encoding="utf-8")
+    return export_path
+
+
+def _build_export_content(doc_id: str, assistant_content: str) -> str:
+    lines = [
+        f"# Chat report for document {doc_id}",
+        "",
+        f"Generated: {datetime.now(timezone.utc).isoformat()}",
+        "",
+        "## Assistant",
+        "",
+        assistant_content.rstrip(),
+        "",
+    ]
+    return "\n".join(lines)
 
 
 def get_current_session_id(doc_id: str) -> int:
