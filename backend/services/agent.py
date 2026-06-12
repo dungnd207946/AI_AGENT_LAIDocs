@@ -57,25 +57,25 @@ CHECKPOINT_DB = LAIDOCS_HOME / "data" / "checkpoints.db"
 # ---------------------------------------------------------------------------
 
 DOCUMENT_SOUL_PROMPT = """\
-You are a Document Assistant - a faithful, precise reader of the user's documents.
+You are a Document Assistant - a faithful, precise reader of the user's selected documents.
 
 ## Your Identity
 You exist to help users understand THEIR documents. You are not a general-purpose AI.
-You are a librarian who has read every page of the document and can find any answer within it.
+The user has selected one or more documents as the current scope; you may read and
+operate ONLY within those files.
 
 ## Core Rules (NON-NEGOTIABLE)
-1. **Document-grounded ONLY**: Every claim in your answer MUST come from the document \
-context retrieved by your tools. If you cannot find the answer in the document, say so honestly.
-2. **No fabrication**: NEVER invent, extrapolate, or assume information not present in the \
-retrieved context. "I don't see this in the document" is always a valid answer.
-3. **Cite sections**: When answering, reference the section title where you found the information. \
-If the answer comes from a figure or a table, cite it explicitly (e.g. "Figure: ..." or "Table: ...") \
-and, for tables, read the relevant cells directly rather than guessing.
-4. **Retrieval first**: Your FIRST tool call for ANY question about the document \
-MUST be `retrieve_context`. Never answer from memory alone.
-5. **The document is NOT a file you can browse**: Your only way to access document content \
-is `retrieve_context`. NEVER tell the user "no document exists" based on a file listing. \
-If you feel the urge to "look for the file", call `retrieve_context` instead.
+1. **Document-grounded ONLY**: Every claim MUST come from context retrieved by your \
+tools across the selected documents. If you cannot find the answer, say so honestly.
+2. **No fabrication**: NEVER invent or assume information not present in retrieved \
+context. "I don't see this in the selected documents" is always a valid answer.
+3. **Cite file and section**: When answering, name the FILE (as shown in the \
+"[File: ...]" label) and the section title where you found the information. For a \
+figure or table, cite it explicitly and read the relevant cells directly.
+4. **Retrieval first**: Your FIRST tool call for ANY content question MUST be \
+`retrieve_context`. Never answer from memory alone.
+5. **Documents are NOT files you can browse**: Your only way to access content is \
+`retrieve_context`. NEVER claim "no document exists" — call `retrieve_context` instead.
 
 ## Evidence Priority
 - For any factual answer about the document, the current turn's `retrieve_context` \
@@ -91,11 +91,9 @@ context does not show it. Do NOT answer document facts from prior assistant mess
 confirmed by the latest `retrieve_context` output.
 
 ## Reading Images
-- The document may contain images referenced in context as `![Image N](/assets/...)`.
-- When the user's question concerns such an image, call `read_image` with the EXACT path \
-from the context and a precise prompt describing what to read.
-- Only read images that actually appear in retrieved context — never invent or guess paths.
-- Treat the vision model's answer as document-grounded content; cite the image (e.g. "Image 1").
+- Context may reference images as `![Image N](/assets/...)`.
+- When the question concerns such an image, call `read_image` with the EXACT path \
+from the context. Only read images that appear in retrieved context.
 
 ## Connecting Concepts (multi-hop questions)
 - For relational questions — how two or more things in the document connect, chains \
@@ -108,13 +106,15 @@ Treat the relation chains as a map of where to look, not as standalone evidence.
 ## Editing the Document
 You CAN edit the document — but ONLY when the user explicitly asks you to change it.
 
-1. **Preview first**: ALWAYS call `preview_edit` first. It shows the exact text that will \
-change and asks for confirmation. NEVER apply without user approval.
-2. **Confirm with the user**: Show the preview and ask for explicit confirmation.
-3. **Apply**: Only after the user clearly agrees, call `apply_edit` with the SAME \
-`old_string`/`new_string` you previewed.
+1. **Infer the target file**: From the user's request and the retrieved context, \
+determine WHICH in-scope file to edit. Pass it as the `file` argument (the name shown \
+in the "[File: ...]" label). If it is ambiguous which file, ASK the user first.
+2. **Preview first**: ALWAYS call `preview_edit` (with `file`, `old_string`, \
+`new_string`) and show the result. NEVER apply without user approval.
+3. **Apply**: Only after explicit approval, call `apply_edit` with the SAME `file` and \
+strings you previewed.
 - `old_string` must come from `retrieve_context` or `preview_edit` — never invent text.
-- **Delete** = pass an empty `new_string`. **Add** = use an existing passage as anchor.
+- **Delete** = empty `new_string`. **Add** = use an existing passage as anchor.
 
 ## Generating markdown exports
 When the user requests to export/save/download content as Markdown, use `create_markdown_file`.
@@ -177,11 +177,10 @@ Assistant: "Tóm tắt nội dung phần 2.1" ← WRONG! That's not a real summa
 **The content you export MUST be the ACTUAL summary/translation/analysis, not just a description of what you're going to do.**
 
 ## Response Style
-- Be concise and well-structured (use headers, bullets, bold for key terms)
-- Match the user's language (if they ask in Vietnamese, answer in Vietnamese)
-- Match the user's language. If the user asks in Vietnamese, answer in Vietnamese and generate any exported markdown content in Vietnamese.
-- Do not switch to English for a Vietnamese request unless the user explicitly asks for English.
-- When the document is ambiguous, present multiple interpretations clearly
+- Be concise and well-structured (headers, bullets, bold for key terms)
+- Match the user's language (Vietnamese in → Vietnamese out), and generate any exported markdown content in the same language
+- Do not switch to English for a Vietnamese request unless the user explicitly asks for English
+- When documents disagree or are ambiguous, present the interpretations clearly
 """
 
 # ---------------------------------------------------------------------------
@@ -285,35 +284,55 @@ def _resolve_asset_path(image_path: str) -> Path | None:
 # ---------------------------------------------------------------------------
 
 
+def _resolve_scope_doc(file: str, ctx: dict[str, Any]) -> str:
+    """Resolve a file label (title shown in [File: ...]) or raw doc_id to a
+    doc_id within the current scope. Returns the doc_id, or an error string
+    for the agent listing the available files.
+    """
+    doc_ids: list[str] = ctx.get("doc_ids") or []
+    titles: dict[str, str] = ctx.get("doc_titles") or {}
+    available = ", ".join(titles.get(d, d) for d in doc_ids) or "(none)"
+
+    f = (file or "").strip()
+    if not f:
+        if len(doc_ids) == 1:
+            return doc_ids[0]
+        return (
+            "Error: multiple files are in scope — specify which file to edit "
+            f"(by its [File: ...] name). Available: {available}"
+        )
+    if f in doc_ids:
+        return f
+    matches = [d for d in doc_ids if titles.get(d, "").strip().lower() == f.lower()]
+    if len(matches) == 1:
+        return matches[0]
+    if len(matches) > 1:
+        return f"Error: '{file}' matches multiple files; use the exact file name."
+    return f"Error: '{file}' is not in the selected scope. Available files: {available}"
+
+
 @tool
 def retrieve_context(question: str) -> str:
-    """Search the document for sections relevant to the user's question.
+    """Search the selected documents for sections relevant to the question.
 
-    ALWAYS call this tool before answering any document question.
-    Returns the most relevant sections with their titles and content.
-    If no relevant sections are found, returns a message saying so.
+    ALWAYS call this tool before answering any content question.
+    Returns the most relevant sections across the in-scope documents, each
+    labelled with its source file. If nothing relevant is found, says so.
 
     Args:
-        question: The specific question to search for in the document.
+        question: The specific question to search for in the selected documents.
     """
     ctx = _tool_context_var.get()
-    doc_id = ctx.get("doc_id", "")
+    doc_ids = ctx.get("doc_ids") or []
     settings = ctx.get("settings")
 
-    if not doc_id or not settings:
+    if not doc_ids or not settings:
         return "Error: Document context not configured."
 
-    context, evidence = retrieval.agentic_retrieve_context_with_evidence(doc_id, question, settings)
-    if evidence:
-        existing = ctx.setdefault("retrieved_units", [])
-        seen = {item.get("unit_id") for item in existing if isinstance(item, dict)}
-        for item in evidence:
-            if item.get("unit_id") not in seen:
-                existing.append(item)
-                seen.add(item.get("unit_id"))
+    context = retrieval.agentic_retrieve_context_multi(doc_ids, question, settings)
     if context:
         return context
-    return "No relevant sections found in the document for this question."
+    return "No relevant sections found in the selected documents for this question."
 
 
 # ---------------------------------------------------------------------------
@@ -337,23 +356,35 @@ def reason_over_graph(question: str) -> str:
         question: The relational question to map across the document.
     """
     ctx = _tool_context_var.get()
-    doc_id = ctx.get("doc_id", "")
+    doc_ids = ctx.get("doc_ids") or []
     settings = ctx.get("settings")
 
-    if not doc_id or not settings:
+    if not doc_ids or not settings:
         return "Error: Document context not configured."
 
+    # Sessions are global with multi-doc scope; walk each in-scope document's
+    # graph and combine the non-empty scaffolds (graph_of_thought is per-doc).
+    titles = ctx.get("doc_titles") or {}
     try:
         from . import knowledge_graph as kg
-        scaffold = kg.graph_of_thought_cached(doc_id, question, settings)
+        scaffolds: list[str] = []
+        for doc_id in doc_ids:
+            scaffold = kg.graph_of_thought_cached(doc_id, question, settings)
+            if not scaffold:
+                continue
+            if len(doc_ids) > 1:
+                scaffolds.append(f"[File: {titles.get(doc_id, doc_id)}]\n{scaffold}")
+            else:
+                scaffolds.append(scaffold)
     except Exception:
         logger.exception("Graph-of-thought reasoning failed")
         return "No connecting relationships found in the document for this question."
 
-    if scaffold:
+    combined = "\n\n".join(scaffolds)
+    if combined:
         # Expose the chain to the stream so the UI can render the reasoning path.
-        ctx["reasoning_chain"] = scaffold
-    return scaffold or "No connecting relationships found in the document for this question."
+        ctx["reasoning_chain"] = combined
+    return combined or "No connecting relationships found in the document for this question."
 
 
 # ---------------------------------------------------------------------------
@@ -416,22 +447,24 @@ def read_image(image_path: str, prompt: str) -> str:
 
 
 @tool
-def preview_edit(old_string: str, new_string: str) -> str:
-    """Preview an edit to the document BEFORE applying it (read-only).
+def preview_edit(file: str, old_string: str, new_string: str) -> str:
+    """Preview an edit to ONE of the in-scope documents BEFORE applying it.
 
-    ALWAYS call this before `apply_edit`. It locates `old_string` in the
-    document and returns the exact snippet that would be replaced, plus the
-    replacement — so you can show the user precisely what will change.
+    ALWAYS call this before `apply_edit`. Locates `old_string` in the named
+    file and returns the exact snippet that would change, plus the replacement.
 
     Args:
+        file: Which document to edit — the file name exactly as shown in the
+            "[File: ...]" label from retrieve_context. Must be one of the
+            files currently in scope.
         old_string: The exact text to find (from retrieve_context). Do NOT
-            include the "[Section: ...]" header line.
+            include the "[File: ... | Section: ...]" header line.
         new_string: The replacement text. Pass an empty string to DELETE.
     """
     ctx = _tool_context_var.get()
-    doc_id = ctx.get("doc_id", "")
-    if not doc_id:
-        return "Error: Document context not configured."
+    doc_id = _resolve_scope_doc(file, ctx)
+    if doc_id.startswith("Error"):
+        return doc_id
 
     content = _get_document_content(doc_id)
     if not content:
@@ -444,28 +477,30 @@ def preview_edit(old_string: str, new_string: str) -> str:
     start, end = located
     matched = content[start:end]
     action = "DELETE" if new_string == "" else "REPLACE"
+    title = (ctx.get("doc_titles") or {}).get(doc_id, doc_id)
     return (
-        f"Preview ({action}) — ask the user to confirm before calling apply_edit.\n\n"
+        f"Preview ({action}) on file '{title}' — ask the user to confirm before "
+        f"calling apply_edit.\n\n"
         f"--- Text that will be removed (exact) ---\n{matched}\n"
         f"--- Replaced with ---\n{new_string if new_string else '(deleted)'}\n"
     )
 
 
 @tool
-async def apply_edit(old_string: str, new_string: str) -> str:
-    """Apply a previewed, USER-CONFIRMED edit to the document.
+async def apply_edit(file: str, old_string: str, new_string: str) -> str:
+    """Apply a previewed, USER-CONFIRMED edit to one in-scope document.
 
-    Only call this AFTER `preview_edit` and AFTER the user has explicitly
-    approved the change. Writes to the document file, database, and index.
+    Only call AFTER `preview_edit` and AFTER the user explicitly approved.
 
     Args:
+        file: Same file you previewed (name as in the "[File: ...]" label).
         old_string: The exact text to replace (same as previewed).
         new_string: The replacement text. Empty string deletes the match.
     """
     ctx = _tool_context_var.get()
-    doc_id = ctx.get("doc_id", "")
-    if not doc_id:
-        return "Error: Document context not configured."
+    doc_id = _resolve_scope_doc(file, ctx)
+    if doc_id.startswith("Error"):
+        return doc_id
 
     content = _get_document_content(doc_id)
     if not content:
@@ -482,9 +517,10 @@ async def apply_edit(old_string: str, new_string: str) -> str:
     except Exception as exc:
         return f"Error applying edit: {exc}"
 
-    # Flag this request as having edited the document so the stream sends [EDITED]
     ctx["edited"] = True
-    return "Edit applied successfully. The document has been updated."
+    ctx["edited_doc_id"] = doc_id
+    title = (ctx.get("doc_titles") or {}).get(doc_id, doc_id)
+    return f"Edit applied successfully to '{title}'. The document has been updated."
 
 
 @tool
@@ -520,9 +556,11 @@ def create_markdown_file(filename: str | None = None, content: str | None = None
         Using format returned by the tool allows the agent to include the answer 
     """
     ctx = _tool_context_var.get()
-    doc_id = ctx.get("doc_id", "")
-    if not doc_id:
-        return "Error: Document context not configured."
+    # Context stores doc_ids (list) under global sessions; doc_id is only used
+    # decoratively for the filename/header, so fall back to "chat" when no doc
+    # is in scope rather than blocking the export entirely.
+    doc_ids = ctx.get("doc_ids") or []
+    doc_id = doc_ids[0] if doc_ids else "chat"
 
     try:
         export_path = create_markdown_export(doc_id, filename=filename, content=content)
@@ -530,7 +568,7 @@ def create_markdown_file(filename: str | None = None, content: str | None = None
         # Determine what content was saved
         if content is None:
             # Content was auto-fetched from chat history
-            messages = get_messages(doc_id)
+            messages = get_messages()
             assistant_messages = [msg for msg in messages if msg.get("role") == "assistant"]
             if not assistant_messages:
                 return "Error: No assistant replies found in chat history to export."
@@ -624,6 +662,30 @@ async def close_checkpointer() -> None:
     _checkpointer = None
 
 
+# Conversation window: the checkpointer is the agent's full memory, but we only
+# feed the model the last MAX_RECENT_TURNS user turns to bound token usage.
+MAX_RECENT_TURNS = 10
+
+
+def _trim_to_recent_turns(state: dict) -> dict:
+    """pre_model_hook: cap the model's view to the last MAX_RECENT_TURNS turns.
+
+    Returns ``llm_input_messages`` (not ``messages``), so the persisted
+    checkpoint history is left intact — only what the LLM sees this step is
+    trimmed. The window always starts on a HumanMessage, which keeps any
+    AIMessage(tool_calls=…)/ToolMessage sequence whole (a ToolMessage is never
+    orphaned at the head of the window).
+    """
+    messages = state["messages"]
+    human_positions = [
+        i for i, m in enumerate(messages) if isinstance(m, HumanMessage)
+    ]
+    if len(human_positions) <= MAX_RECENT_TURNS:
+        return {"llm_input_messages": messages}
+    start = human_positions[-MAX_RECENT_TURNS]
+    return {"llm_input_messages": messages[start:]}
+
+
 async def get_document_agent() -> CompiledStateGraph:
     """Get or create the singleton ReAct agent."""
     global _agent
@@ -640,17 +702,26 @@ async def get_document_agent() -> CompiledStateGraph:
         tools=[retrieve_context, reason_over_graph, read_image, preview_edit, apply_edit, create_markdown_file],
         prompt=_build_system_prompt(),
         checkpointer=checkpointer,
+        pre_model_hook=_trim_to_recent_turns,
     )
     return _agent
 
 
-def set_tool_context(doc_id: str, settings: Settings) -> None:
-    """Set per-request tool context (doc_id + settings) via ContextVar.
-
-    Also initialises the ``edited`` flag to False so ``document_was_edited``
-    returns the correct value for each new request.
+def set_tool_context(
+    doc_ids: list[str],
+    settings: Settings,
+    doc_titles: dict[str, str] | None = None,
+) -> None:
+    """Set per-request tool context (selected doc scope + settings) via
+    ContextVar. ``doc_titles`` maps doc_id → display title so edit tools can
+    resolve a file the agent names. Initialises the ``edited`` flag to False.
     """
-    _tool_context_var.set({"doc_id": doc_id, "settings": settings, "edited": False})
+    _tool_context_var.set({
+        "doc_ids": list(doc_ids),
+        "settings": settings,
+        "doc_titles": doc_titles or {},
+        "edited": False,
+    })
 
 
 def document_was_edited() -> bool:

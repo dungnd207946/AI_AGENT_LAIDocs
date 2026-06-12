@@ -1,19 +1,18 @@
 """Chat history service for display-layer message persistence.
 
-Stores ALL messages across ALL sessions for UI display purposes.
-Separate from the agent's conversation memory (LangGraph MemorySaver
-which is intentionally in-memory only — see docs/plans/e2e-issues.md).
+Sessions are GLOBAL: a session is identified by ``session_id`` alone and is
+not tied to any document. The set of documents in scope for a turn is a
+transient per-request value (sent by the frontend), never persisted here.
 
-Context injection:
-  - get_messages_for_session() — load a session's messages to inject into
-    the agent on resume, replacing the lost MemorySaver state.
+Stores ALL messages across ALL sessions for UI display. Separate from the
+agent's LangGraph checkpointer (keyed by thread_id "session-{session_id}").
 
 Compact support:
-  - Rows with role='summary' are synthetic summaries produced by the compactor.
-  - get_messages()             — UI display (all rows including summaries)
-  - get_messages_for_compact() — compactor input (latest summary + messages after it)
+  - Rows with role='summary' are synthetic summaries from the compactor.
+  - get_messages()             — UI display (all rows incl. summaries)
+  - get_messages_for_compact() — compactor input (latest summary + rows after)
   - save_compact_summary()     — insert a summary row
-  - delete_compacted_messages() — remove rows that were folded into a summary
+  - delete_compacted_messages() — remove rows folded into a summary
 """
 
 from __future__ import annotations
@@ -53,7 +52,7 @@ def _sanitize_export_filename(filename: str) -> str:
 def create_markdown_export(doc_id: str, filename: str | None = None, content: str | None = None) -> Path:
     """Build a Markdown file from the latest assistant reply or provided content."""
     if content is None:
-        messages = get_messages(doc_id)
+        messages = get_messages()
         if not messages:
             raise ValueError(f"No chat history found for doc_id {doc_id}")
 
@@ -97,29 +96,24 @@ def _build_export_content(doc_id: str, assistant_content: str) -> str:
     ]
     return "\n".join(lines)
 
-def get_current_session_id(doc_id: str) -> int:
-    """Get the current (latest) session ID for a document."""
+def get_current_session_id() -> int:
+    """Get the current (latest) global session ID; 1 when there is none."""
     with get_db() as conn:
-        row = conn.execute(
-            "SELECT MAX(session_id) FROM chat_messages WHERE doc_id = ?",
-            (doc_id,),
-        ).fetchone()
+        row = conn.execute("SELECT MAX(session_id) FROM chat_messages").fetchone()
     return row[0] if row and row[0] else 1
 
 
-def start_new_session(doc_id: str) -> int:
-    """Increment session counter and return the new session ID."""
-    current = get_current_session_id(doc_id)
-    return current + 1
+def start_new_session() -> int:
+    """Return the next global session ID."""
+    return get_current_session_id() + 1
 
 
-def save_message(doc_id: str, session_id: int, role: str, content: str) -> int:
-    """Save a single message to the display history."""
+def save_message(session_id: int, role: str, content: str) -> int:
+    """Save a single display message (doc_id left NULL — scope is transient)."""
     with get_db() as conn:
         cursor = conn.execute(
-            """INSERT INTO chat_messages (doc_id, session_id, role, content)
-               VALUES (?, ?, ?, ?)""",
-            (doc_id, session_id, role, content),
+            "INSERT INTO chat_messages (session_id, role, content) VALUES (?, ?, ?)",
+            (session_id, role, content),
         )
         return int(cursor.lastrowid)
 
@@ -172,66 +166,99 @@ def save_message_chain(message_id: int, doc_id: str, chain: str) -> None:
         )
 
 
-def _load_chains_by_message_id(doc_id: str, message_ids: list[int]) -> dict[int, str]:
+def _load_chains_by_message_id(message_ids: list[int]) -> dict[int, str]:
+    """Load reasoning chains by globally-unique message_id (sessions are global)."""
     if not message_ids:
         return {}
     placeholders = ",".join("?" for _ in message_ids)
     with get_db() as conn:
         rows = conn.execute(
             f"""SELECT message_id, chain FROM chat_message_chains
-                WHERE doc_id = ? AND message_id IN ({placeholders})""",
-            [doc_id, *message_ids],
+                WHERE message_id IN ({placeholders})""",
+            list(message_ids),
         ).fetchall()
     return {int(row[0]): row[1] for row in rows if row[1]}
 
 
-def get_messages(doc_id: str) -> list[dict]:
-    """Load all messages for a document, ordered by creation time.
+def _load_evidence_by_message_id(message_ids: list[int]) -> dict[int, list[dict]]:
+    """Load citation evidence by globally-unique message_id (sessions are global).
 
-    Includes summary rows (role='summary') so the UI can show them.
+    Keeps each row's ``doc_id`` so the display layer can rebuild heading_path +
+    preview from the right document's current units.
     """
+    if not message_ids:
+        return {}
+    placeholders = ",".join("?" for _ in message_ids)
+    with get_db() as conn:
+        rows = conn.execute(
+            f"""SELECT message_id, doc_id, unit_id, unit_hash, title, kind
+                FROM chat_message_evidence
+                WHERE message_id IN ({placeholders})
+                ORDER BY message_id ASC, unit_id ASC""",
+            list(message_ids),
+        ).fetchall()
+    evidence_by_message: dict[int, list[dict]] = {}
+    for row in rows:
+        message_id = int(row[0])
+        evidence_by_message.setdefault(message_id, []).append(
+            {
+                "doc_id": row[1],
+                "unit_id": row[2],
+                "unit_hash": row[3],
+                "title": row[4],
+                "kind": row[5],
+            }
+        )
+    return evidence_by_message
+
+
+def get_messages() -> list[dict]:
+    """Load ALL messages globally, ordered by creation time (incl. summaries)."""
     with get_db() as conn:
         rows = conn.execute(
             """SELECT id, session_id, role, content, created_at
-               FROM chat_messages
-               WHERE doc_id = ?
-               ORDER BY created_at ASC""",
-            (doc_id,),
+               FROM chat_messages ORDER BY created_at ASC, id ASC"""
         ).fetchall()
     return [
         {
-            "id": row[0],
-            "session_id": row[1],
-            "role": row[2],
-            "content": row[3],
-            "created_at": row[4],
+            "id": r[0],
+            "session_id": r[1],
+            "role": r[2],
+            "content": r[3],
+            "created_at": r[4],
         }
-        for row in rows
+        for r in rows
     ]
 
 
-def get_display_messages(doc_id: str) -> list[dict]:
+def get_display_messages() -> list[dict]:
     """Load all messages for the UI, enriched with citation evidence + chains.
 
-    Each assistant message gains an ``evidence`` list (with ``heading_path`` and
-    a ``preview`` snippet reconstructed from the *current* document units, so
-    stale chunks are simply dropped) and a ``chain`` string when one was saved.
+    Sessions are global; evidence/chains are keyed by globally-unique
+    ``message_id``. Each assistant message gains an ``evidence`` list (with
+    ``heading_path`` + a ``preview`` reconstructed from the *current* document
+    units, so stale chunks are dropped) and a ``chain`` string when one was saved.
     """
-    messages = get_messages(doc_id)
+    messages = get_messages()
     assistant_ids = [int(m["id"]) for m in messages if m["role"] == "assistant"]
-    evidence_by_message = _load_evidence_by_message_id(doc_id, assistant_ids)
-    chains_by_message = _load_chains_by_message_id(doc_id, assistant_ids)
+    evidence_by_message = _load_evidence_by_message_id(assistant_ids)
+    chains_by_message = _load_chains_by_message_id(assistant_ids)
 
-    # Reconstruct heading_path + preview from current units (one corpus build).
-    units_by_id: dict[str, dict] = {}
-    try:
-        units_by_id = {
-            str(u.get("unit_id") or ""): u
-            for u in retrieval.get_retrieval_units(doc_id)
-            if str(u.get("unit_id") or "")
-        }
-    except Exception:
-        units_by_id = {}
+    # Reconstruct heading_path + preview from current units, one corpus per doc
+    # (evidence may span multiple in-scope documents under global sessions).
+    units_by_doc: dict[str, dict[str, dict]] = {}
+
+    def _units_for(doc_id: str) -> dict[str, dict]:
+        if doc_id not in units_by_doc:
+            try:
+                units_by_doc[doc_id] = {
+                    str(u.get("unit_id") or ""): u
+                    for u in retrieval.get_retrieval_units(doc_id)
+                    if str(u.get("unit_id") or "")
+                }
+            except Exception:
+                units_by_doc[doc_id] = {}
+        return units_by_doc[doc_id]
 
     for msg in messages:
         if msg["role"] != "assistant":
@@ -240,7 +267,7 @@ def get_display_messages(doc_id: str) -> list[dict]:
         enriched: list[dict] = []
         for item in evidence_by_message.get(mid, []):
             unit_id = str(item.get("unit_id") or "")
-            unit = units_by_id.get(unit_id)
+            unit = _units_for(str(item.get("doc_id") or "")).get(unit_id)
             enriched.append(
                 {
                     "unit_id": unit_id,
@@ -257,148 +284,51 @@ def get_display_messages(doc_id: str) -> list[dict]:
     return messages
 
 
-def get_messages_for_session(doc_id: str, session_id: int) -> list[dict]:
+def get_messages_for_session(session_id: int) -> list[dict]:
     """Load messages for agent context injection on session resume.
 
-    Returns 'user' and 'assistant' rows for this session only.
-    If a compact summary exists for this doc, it is prepended as a synthetic
-    user/assistant exchange so the agent has prior context without seeing the
-    raw role='summary' marker (which LangGraph does not understand).
+    Returns 'user'/'assistant' rows for this session. If a compact summary
+    exists for this session, prepend it as a synthetic user/assistant exchange
+    (LangGraph does not understand role='summary').
     """
     with get_db() as conn:
-        # Latest compact summary across all sessions
         summary_row = conn.execute(
             """SELECT content FROM chat_messages
-               WHERE doc_id = ? AND role = 'summary'
+               WHERE session_id = ? AND role = 'summary'
                ORDER BY created_at DESC LIMIT 1""",
-            (doc_id,),
+            (session_id,),
         ).fetchone()
-
         rows = conn.execute(
-            """SELECT id, role, content FROM chat_messages
-               WHERE doc_id = ? AND session_id = ?
-                 AND role IN ('user', 'assistant')
-               ORDER BY created_at ASC""",
-            (doc_id, session_id),
+            """SELECT role, content FROM chat_messages
+               WHERE session_id = ? AND role IN ('user', 'assistant')
+               ORDER BY created_at ASC, id ASC""",
+            (session_id,),
         ).fetchall()
 
     result: list[dict] = []
     if summary_row:
-        # Inject as a synthetic assistant turn so the agent treats it as prior context.
-        # Summaries are not chunk-level evidence and must not override fresh retrieval.
         result.append({"role": "user", "content": "Summarize our conversation so far."})
-        result.append({
-            "role": "assistant",
-            "content": (
-                f"{summary_row[0]}\n\n"
-                "[UNVERIFIED HISTORY - conversation summary only; do not use as document evidence.]"
-            ),
-        })
-
-    current_hashes = retrieval.get_current_unit_hashes(doc_id)
-    evidence_by_message = _load_evidence_by_message_id(doc_id, [int(row[0]) for row in rows])
-    for row in rows:
-        message_id = int(row[0])
-        role = row[1]
-        content = row[2]
-        if role == "assistant":
-            content = _annotate_assistant_history(content, evidence_by_message.get(message_id, []), current_hashes)
-        result.append({"role": role, "content": content})
+        result.append({"role": "assistant", "content": summary_row[0]})
+    result += [{"role": r[0], "content": r[1]} for r in rows]
     return result
 
 
-def _load_evidence_by_message_id(doc_id: str, message_ids: list[int]) -> dict[int, list[dict]]:
-    if not message_ids:
-        return {}
-
-    placeholders = ",".join("?" for _ in message_ids)
+def get_messages_for_compact(session_id: int) -> list[dict]:
+    """Load messages for the compactor: latest summary (if any) + rows after it."""
     with get_db() as conn:
-        rows = conn.execute(
-            f"""SELECT message_id, unit_id, unit_hash, title, kind
-                FROM chat_message_evidence
-                WHERE doc_id = ? AND message_id IN ({placeholders})
-                ORDER BY message_id ASC, unit_id ASC""",
-            [doc_id, *message_ids],
-        ).fetchall()
-
-    evidence_by_message: dict[int, list[dict]] = {}
-    for row in rows:
-        message_id = int(row[0])
-        evidence_by_message.setdefault(message_id, []).append(
-            {
-                "unit_id": row[1],
-                "unit_hash": row[2],
-                "title": row[3],
-                "kind": row[4],
-            }
-        )
-    return evidence_by_message
-
-
-def _annotate_assistant_history(
-    content: str,
-    evidence: list[dict],
-    current_hashes: dict[str, str],
-) -> str:
-    if not evidence:
-        return (
-            f"{content}\n\n"
-            "[UNVERIFIED HISTORY - this older answer has no chunk evidence metadata; "
-            "do not use it as evidence for document facts.]"
-        )
-
-    stale_units = []
-    for item in evidence:
-        unit_id = str(item.get("unit_id") or "")
-        saved_hash = str(item.get("unit_hash") or "")
-        if current_hashes.get(unit_id) != saved_hash:
-            stale_units.append(unit_id)
-
-    if stale_units:
-        return (
-            f"{content}\n\n"
-            "[STALE HISTORY - this answer referenced document chunks that have changed "
-            f"or no longer exist: {', '.join(stale_units)}. Do not use it as evidence; "
-            "call retrieve_context and trust the latest retrieved context.]"
-        )
-
-    valid_units = [str(item.get("unit_id") or "") for item in evidence if item.get("unit_id")]
-    return (
-        f"{content}\n\n"
-        "[VALID HISTORY - referenced document chunks are unchanged "
-        f"({', '.join(valid_units)}). You may use this for conversation continuity, "
-        "but current retrieve_context output remains authoritative for document facts.]"
-    )
-
-
-def get_messages_for_compact(doc_id: str) -> list[dict]:
-    """Load messages for the compactor.
-
-    Returns the latest summary row (if any) followed by all subsequent
-    regular messages, so the compactor always works on a flat sequence
-    without re-processing already-summarised content.
-    """
-    with get_db() as conn:
-        # Find the most recent summary row
         summary_row = conn.execute(
-            """SELECT id, session_id, role, content, created_at
-               FROM chat_messages
-               WHERE doc_id = ? AND role = 'summary'
-               ORDER BY created_at DESC
-               LIMIT 1""",
-            (doc_id,),
+            """SELECT id, session_id, role, content, created_at FROM chat_messages
+               WHERE session_id = ? AND role = 'summary'
+               ORDER BY created_at DESC LIMIT 1""",
+            (session_id,),
         ).fetchone()
-
         if summary_row:
-            # Messages AFTER the last summary (regular chat only)
             rows = conn.execute(
-                """SELECT id, session_id, role, content, created_at
-                   FROM chat_messages
-                   WHERE doc_id = ?
-                     AND role IN ('user', 'assistant')
+                """SELECT id, session_id, role, content, created_at FROM chat_messages
+                   WHERE session_id = ? AND role IN ('user', 'assistant')
                      AND created_at > ?
-                   ORDER BY created_at ASC""",
-                (doc_id, summary_row[4]),
+                   ORDER BY created_at ASC, id ASC""",
+                (session_id, summary_row[4]),
             ).fetchall()
             result = [
                 {
@@ -411,59 +341,54 @@ def get_messages_for_compact(doc_id: str) -> list[dict]:
             ]
         else:
             rows = conn.execute(
-                """SELECT id, session_id, role, content, created_at
-                   FROM chat_messages
-                   WHERE doc_id = ? AND role IN ('user', 'assistant')
-                   ORDER BY created_at ASC""",
-                (doc_id,),
+                """SELECT id, session_id, role, content, created_at FROM chat_messages
+                   WHERE session_id = ? AND role IN ('user', 'assistant')
+                   ORDER BY created_at ASC, id ASC""",
+                (session_id,),
             ).fetchall()
             result = []
 
     result += [
         {
-            "id": row[0],
-            "session_id": row[1],
-            "role": row[2],
-            "content": row[3],
-            "created_at": row[4],
+            "id": r[0],
+            "session_id": r[1],
+            "role": r[2],
+            "content": r[3],
+            "created_at": r[4],
         }
-        for row in rows
+        for r in rows
     ]
     return result
 
 
-def save_compact_summary(doc_id: str, session_id: int, summary: str) -> None:
+def save_compact_summary(session_id: int, summary: str) -> None:
     """Insert a compacted summary row (role='summary')."""
     with get_db() as conn:
         conn.execute(
-            """INSERT INTO chat_messages (doc_id, session_id, role, content)
-               VALUES (?, ?, 'summary', ?)""",
-            (doc_id, session_id, summary),
+            "INSERT INTO chat_messages (session_id, role, content) VALUES (?, 'summary', ?)",
+            (session_id, summary),
         )
 
 
-def delete_compacted_messages(doc_id: str, message_ids: list[int]) -> None:
-    """Delete rows that have been folded into a summary."""
+def delete_compacted_messages(message_ids: list[int]) -> None:
+    """Delete rows folded into a summary (ids are globally unique)."""
     if not message_ids:
         return
     placeholders = ",".join("?" * len(message_ids))
     with get_db() as conn:
         conn.execute(
-            f"DELETE FROM chat_messages WHERE doc_id = ? AND id IN ({placeholders})",
-            [doc_id, *message_ids],
+            f"DELETE FROM chat_messages WHERE id IN ({placeholders})",
+            list(message_ids),
         )
 
 
-def delete_messages(doc_id: str) -> None:
-    """Delete all messages for a document (including summaries)."""
+def delete_messages() -> None:
+    """Delete ALL messages (every session)."""
     with get_db() as conn:
-        conn.execute("DELETE FROM chat_messages WHERE doc_id = ?", (doc_id,))
+        conn.execute("DELETE FROM chat_messages")
 
 
-def delete_session(doc_id: str, session_id: int) -> None:
-    """Delete all messages belonging to a single session of a document."""
+def delete_session(session_id: int) -> None:
+    """Delete all messages belonging to a single session."""
     with get_db() as conn:
-        conn.execute(
-            "DELETE FROM chat_messages WHERE doc_id = ? AND session_id = ?",
-            (doc_id, session_id),
-        )
+        conn.execute("DELETE FROM chat_messages WHERE session_id = ?", (session_id,))

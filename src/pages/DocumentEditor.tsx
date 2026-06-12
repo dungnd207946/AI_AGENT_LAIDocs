@@ -572,7 +572,7 @@ export default function DocumentEditor() {
               onMouseLeave={(e) => { if (!isChatDragging) e.currentTarget.style.background = "transparent"; }}
             />
             <div style={{ flex: 1, overflow: "hidden" }}>
-              <ChatPanel key={id} docId={id} onDocumentEdited={reloadDocument} onJumpToSource={handleJumpToSource} onClose={() => { chatHasAnimated.current = false; setShowChat(false); }} />
+              <ChatPanel key={id} initialDocId={id} onDocumentEdited={reloadDocument} onJumpToSource={handleJumpToSource} onClose={() => { chatHasAnimated.current = false; setShowChat(false); }} />
             </div>
           </div>
         )}

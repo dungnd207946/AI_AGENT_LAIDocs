@@ -88,14 +88,13 @@ def _format_for_compact(messages: list[dict]) -> str:
 
 
 async def compact_if_needed(
-    doc_id: str,
+    session_id: int,
     settings: "Settings",
     threshold: int = COMPACT_THRESHOLD_TOKENS,
 ) -> bool:
-    """Check display history; compact if over threshold.
+    """Check a session's display history; compact if over threshold.
 
-    Returns True if compaction was performed (caller may want to log/notify).
-    Reads and writes via chat_history functions directly.
+    Returns True if compaction was performed. Reads/writes via chat_history.
     """
     from ..services.chat_history import (
         get_messages_for_compact,
@@ -103,9 +102,8 @@ async def compact_if_needed(
         delete_compacted_messages,
     )
 
-    messages = get_messages_for_compact(doc_id)
+    messages = get_messages_for_compact(session_id)
 
-    # Nothing to compact
     if len(messages) <= TAIL_MESSAGES:
         return False
 
@@ -113,19 +111,16 @@ async def compact_if_needed(
     if total_tokens <= threshold:
         return False
 
-    # Split: body (to compact) vs tail (keep verbatim)
     body = messages[:-TAIL_MESSAGES]
     tail = messages[-TAIL_MESSAGES:]
 
-    # Tail alone already under threshold — no need to compact further
     if estimate_tokens(tail) >= threshold:
-        # Edge case: even tail is huge; compact everything, keep last 1 pair
         body = messages[:-2]
         tail = messages[-2:]
 
     logger.info(
-        "Compacting %d messages (est. %d tokens) for doc %s",
-        len(body), total_tokens, doc_id,
+        "Compacting %d messages (est. %d tokens) for session %s",
+        len(body), total_tokens, session_id,
     )
 
     history_text = _format_for_compact(body)
@@ -135,10 +130,9 @@ async def compact_if_needed(
         logger.exception("Compaction LLM call failed; skipping compact")
         return False
 
-    # Persist: delete compacted rows, insert summary row
     body_ids = [m["id"] for m in body]
-    save_compact_summary(doc_id, tail[0]["session_id"], summary)
-    delete_compacted_messages(doc_id, body_ids)
+    save_compact_summary(session_id, summary)
+    delete_compacted_messages(body_ids)
 
-    logger.info("Compaction done for doc %s; summary saved", doc_id)
+    logger.info("Compaction done for session %s; summary saved", session_id)
     return True
