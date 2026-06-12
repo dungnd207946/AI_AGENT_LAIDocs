@@ -7,6 +7,7 @@ import gfm from "@bytemd/plugin-gfm";
 import "bytemd/dist/index.css";
 import "../styles/bytemd-theme.css";
 import ChatPanel from "../components/ChatPanel";
+import type { Evidence } from "../lib/sidecar";
 import { open } from "@tauri-apps/plugin-shell";
 
 type SaveStatus = "saved" | "saving" | "unsaved" | "error";
@@ -249,6 +250,38 @@ export default function DocumentEditor() {
   }, [id]);
 
   useEffect(() => () => { if (debounceRef.current) clearTimeout(debounceRef.current); }, []);
+
+  // Jump-to-source: when a citation chip is clicked, scroll the ByteMD preview
+  // pane to the heading the evidence came from and flash it. Best-effort — if
+  // the preview pane isn't rendered (edit-only view) or no heading matches, it
+  // silently no-ops.
+  const handleJumpToSource = useCallback((ev: Evidence) => {
+    const root = editorContainerRef.current;
+    if (!root) return;
+    const targetRaw =
+      (ev.heading_path && ev.heading_path.length
+        ? ev.heading_path[ev.heading_path.length - 1]
+        : ev.title) || "";
+    const target = targetRaw.trim().toLowerCase();
+    if (!target) return;
+
+    const preview = root.querySelector(".bytemd-preview");
+    const scope: ParentNode = preview ?? root;
+    const headings = Array.from(
+      scope.querySelectorAll("h1, h2, h3, h4, h5, h6"),
+    ) as HTMLElement[];
+
+    const norm = (s: string) => s.replace(/\s+/g, " ").trim().toLowerCase();
+    let match = headings.find((h) => norm(h.textContent || "") === target);
+    if (!match) match = headings.find((h) => norm(h.textContent || "").includes(target));
+    if (!match) return;
+
+    match.scrollIntoView({ behavior: "smooth", block: "center" });
+    const prev = match.style.backgroundColor;
+    match.style.transition = "background-color 0.3s";
+    match.style.backgroundColor = "var(--accent-subtle)";
+    setTimeout(() => { match!.style.backgroundColor = prev; }, 1400);
+  }, []);
 
   const handleEditorClick = useCallback((e: React.MouseEvent) => {
     const target = e.target as HTMLElement;
@@ -539,7 +572,7 @@ export default function DocumentEditor() {
               onMouseLeave={(e) => { if (!isChatDragging) e.currentTarget.style.background = "transparent"; }}
             />
             <div style={{ flex: 1, overflow: "hidden" }}>
-              <ChatPanel key={id} docId={id} onDocumentEdited={reloadDocument} onClose={() => { chatHasAnimated.current = false; setShowChat(false); }} />
+              <ChatPanel key={id} docId={id} onDocumentEdited={reloadDocument} onJumpToSource={handleJumpToSource} onClose={() => { chatHasAnimated.current = false; setShowChat(false); }} />
             </div>
           </div>
         )}
