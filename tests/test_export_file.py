@@ -6,7 +6,7 @@ import backend.services.chat_history as chat_history
 def test_create_markdown_export_writes_report(tmp_path, monkeypatch):
     monkeypatch.setattr(chat_history, "DOWNLOADS_DIR", tmp_path / "downloads")
 
-    def fake_get_messages(doc_id: str):
+    def fake_get_messages(doc_id: str | None = None):
         return [
             {"id": 1, "session_id": 1, "role": "user", "content": "Viết báo cáo về doanh số.", "created_at": "2026-06-10 10:00:00"},
             {"id": 2, "session_id": 1, "role": "assistant", "content": "Báo cáo doanh số:\n- Doanh thu tăng 10%.", "created_at": "2026-06-10 10:00:05"},

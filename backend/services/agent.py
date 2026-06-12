@@ -496,9 +496,11 @@ def create_markdown_file(filename: str | None = None, content: str | None = None
         Using format returned by the tool allows the agent to include the answer 
     """
     ctx = _tool_context_var.get()
-    doc_id = ctx.get("doc_id", "")
-    if not doc_id:
-        return "Error: Document context not configured."
+    # Context stores doc_ids (list) under global sessions; doc_id is only used
+    # decoratively for the filename/header, so fall back to "chat" when no doc
+    # is in scope rather than blocking the export entirely.
+    doc_ids = ctx.get("doc_ids") or []
+    doc_id = doc_ids[0] if doc_ids else "chat"
 
     try:
         export_path = create_markdown_export(doc_id, filename=filename, content=content)
@@ -506,7 +508,7 @@ def create_markdown_file(filename: str | None = None, content: str | None = None
         # Determine what content was saved
         if content is None:
             # Content was auto-fetched from chat history
-            messages = get_messages(doc_id)
+            messages = get_messages()
             assistant_messages = [msg for msg in messages if msg.get("role") == "assistant"]
             if not assistant_messages:
                 return "Error: No assistant replies found in chat history to export."
@@ -638,7 +640,7 @@ async def get_document_agent() -> CompiledStateGraph:
     _agent = create_react_agent(
         model=model,
         tools=[retrieve_context, read_image, preview_edit, apply_edit, create_markdown_file],
-        prompt=-_build_system_prompt(),
+        prompt=_build_system_prompt(),
         checkpointer=checkpointer,
         pre_model_hook=_trim_to_recent_turns,
     )

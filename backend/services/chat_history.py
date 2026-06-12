@@ -52,7 +52,7 @@ def _sanitize_export_filename(filename: str) -> str:
 def create_markdown_export(doc_id: str, filename: str | None = None, content: str | None = None) -> Path:
     """Build a Markdown file from the latest assistant reply or provided content."""
     if content is None:
-        messages = get_messages(doc_id)
+        messages = get_messages()
         if not messages:
             raise ValueError(f"No chat history found for doc_id {doc_id}")
 
