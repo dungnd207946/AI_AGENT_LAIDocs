@@ -38,6 +38,7 @@ from ..services.chat_history import (
     delete_messages,
     delete_session,
 )
+from ..services.compactor import compact_checkpointer_if_needed
 
 logger = logging.getLogger(__name__)
 
@@ -128,6 +129,8 @@ async def chat_stream(body: ChatRequest):
 
     async def _event_generator():
         full_response = ""
+        agent = None
+        config = None
         try:
             agent = await get_document_agent()
             config = {
@@ -207,6 +210,22 @@ async def chat_stream(body: ChatRequest):
             # Signal the frontend to reload the document if the agent edited it
             if document_was_edited():
                 yield "data: [EDITED]\n\n"
+
+            # Compact the LangGraph checkpoint (the agent's durable working
+            # memory) so the NEXT turn in this session starts from a smaller
+            # message list. pre_model_hook only trims what the LLM sees per
+            # request — it doesn't shrink the persisted checkpoint, so old
+            # turns would otherwise accumulate (and eventually be hard-dropped
+            # with no summary). This never touches chat_messages/display
+            # history or evidence/chain persistence above.
+            if agent is not None and config is not None:
+                try:
+                    await compact_checkpointer_if_needed(
+                        agent, config["configurable"]["thread_id"], settings
+                    )
+                except Exception:
+                    logger.exception("compact_checkpointer_if_needed failed; continuing")
+
             yield "data: [DONE]\n\n"
 
     return StreamingResponse(
