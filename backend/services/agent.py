@@ -95,8 +95,16 @@ confirmed by the latest `retrieve_context` output.
 - When the question concerns such an image, call `read_image` with the EXACT path \
 from the context. Only read images that appear in retrieved context.
 
-## Editing a Document
-You CAN edit a document — but ONLY when the user explicitly asks you to change it.
+## Connecting Concepts (multi-hop questions)
+- For relational questions — how two or more things in the document connect, chains \
+like "X founded by Y who created Z", or "what links A and B" — call `reason_over_graph` \
+to get the explicit relation chains from the document's knowledge graph.
+- `reason_over_graph` COMPLEMENTS, it does not replace, `retrieve_context`: still call \
+`retrieve_context` for the supporting passages, and ground every claim in retrieved text. \
+Treat the relation chains as a map of where to look, not as standalone evidence.
+
+## Editing the Document
+You CAN edit the document — but ONLY when the user explicitly asks you to change it.
 
 1. **Infer the target file**: From the user's request and the retrieved context, \
 determine WHICH in-scope file to edit. Pass it as the `file` argument (the name shown \
@@ -325,6 +333,58 @@ def retrieve_context(question: str) -> str:
     if context:
         return context
     return "No relevant sections found in the selected documents for this question."
+
+
+# ---------------------------------------------------------------------------
+# Tool — Graph-of-thought reasoning (GraphRAG)
+# ---------------------------------------------------------------------------
+
+
+@tool
+def reason_over_graph(question: str) -> str:
+    """Trace how concepts in a relational question connect across the document.
+
+    Use this for multi-hop / "how is X related to Y" questions whose answer is
+    spread across sections. Returns explicit relation chains (a knowledge-graph
+    reasoning scaffold) built from the document, e.g.
+    `Acme --[founded by]--> Jane --[born in]--> Paris`.
+
+    This COMPLEMENTS `retrieve_context` — still call `retrieve_context` for the
+    supporting passages and ground every claim in the retrieved text.
+
+    Args:
+        question: The relational question to map across the document.
+    """
+    ctx = _tool_context_var.get()
+    doc_ids = ctx.get("doc_ids") or []
+    settings = ctx.get("settings")
+
+    if not doc_ids or not settings:
+        return "Error: Document context not configured."
+
+    # Sessions are global with multi-doc scope; walk each in-scope document's
+    # graph and combine the non-empty scaffolds (graph_of_thought is per-doc).
+    titles = ctx.get("doc_titles") or {}
+    try:
+        from . import knowledge_graph as kg
+        scaffolds: list[str] = []
+        for doc_id in doc_ids:
+            scaffold = kg.graph_of_thought_cached(doc_id, question, settings)
+            if not scaffold:
+                continue
+            if len(doc_ids) > 1:
+                scaffolds.append(f"[File: {titles.get(doc_id, doc_id)}]\n{scaffold}")
+            else:
+                scaffolds.append(scaffold)
+    except Exception:
+        logger.exception("Graph-of-thought reasoning failed")
+        return "No connecting relationships found in the document for this question."
+
+    combined = "\n\n".join(scaffolds)
+    if combined:
+        # Expose the chain to the stream so the UI can render the reasoning path.
+        ctx["reasoning_chain"] = combined
+    return combined or "No connecting relationships found in the document for this question."
 
 
 # ---------------------------------------------------------------------------
@@ -639,7 +699,7 @@ async def get_document_agent() -> CompiledStateGraph:
 
     _agent = create_react_agent(
         model=model,
-        tools=[retrieve_context, read_image, preview_edit, apply_edit, create_markdown_file],
+        tools=[retrieve_context, reason_over_graph, read_image, preview_edit, apply_edit, create_markdown_file],
         prompt=_build_system_prompt(),
         checkpointer=checkpointer,
         pre_model_hook=_trim_to_recent_turns,
@@ -673,6 +733,12 @@ def get_retrieved_evidence() -> list[dict]:
     """Return retrieval-unit evidence collected during the current request."""
     evidence = _tool_context_var.get().get("retrieved_units", [])
     return evidence if isinstance(evidence, list) else []
+
+
+def get_reasoning_chain() -> str:
+    """Return the graph-of-thought chain produced this request (or '')."""
+    chain = _tool_context_var.get().get("reasoning_chain", "")
+    return chain if isinstance(chain, str) else ""
 
 
 def reset_agent() -> None:

@@ -1,6 +1,10 @@
 import React, { useState, useRef, useEffect, useCallback, useMemo } from "react";
-import { streamChat, getChatHistory, startNewSession, clearChatHistory, deleteSession, listDocuments, DocSummary } from "../lib/sidecar";
+import { streamChat, getChatHistory, startNewSession, clearChatHistory, deleteSession, listDocuments, compareRetrieval } from "../lib/sidecar";
+import type { Evidence, CompareResult, DocSummary } from "../lib/sidecar";
 import MarkdownPreview from "./MarkdownPreview";
+import CitationChips from "./CitationChips";
+import ReasoningChain from "./ReasoningChain";
+import CompareDrawer from "./CompareDrawer";
 
 interface Message {
   id: string;
@@ -8,7 +12,11 @@ interface Message {
   content: string;
   streaming?: boolean;
   sessionId?: number;
+  evidence?: Evidence[];
+  chain?: string;
 }
+
+const DEMO_MODE_KEY = "laidocs-demo-mode";
 
 const IconTrash = () => (
   <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
@@ -77,23 +85,30 @@ const IconUser = () => (
   </svg>
 );
 
-function MessageBubble({ message }: { message: Message }) {
+const IconScale = () => (
+  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M12 3v18" /><path d="M5 7h14" /><path d="M5 7l-3 6a4 4 0 0 0 6 0z" /><path d="M19 7l3 6a4 4 0 0 1-6 0z" />
+    <path d="M8 21h8" />
+  </svg>
+);
+
+function MessageBubble({ message, onJumpToSource }: { message: Message; onJumpToSource?: (ev: Evidence) => void }) {
   const isUser = message.role === "user";
   return (
     <div className={`flex gap-3 fade-in-up w-full ${isUser ? "flex-row-reverse" : "flex-row"}`}>
       {/* Avatar */}
       <div className={`shrink-0 w-7 h-7 rounded-lg flex items-center justify-center mt-1 border ${
-        isUser 
-          ? "bg-[var(--surface-alt)] text-[var(--text-secondary)] border-[var(--border)]" 
+        isUser
+          ? "bg-[var(--surface-alt)] text-[var(--text-secondary)] border-[var(--border)]"
           : "bg-[var(--accent-subtle)] text-[var(--accent-text)] border-[var(--border-glow)]"
       }`}>
         {isUser ? <IconUser /> : <IconBot />}
       </div>
 
       {/* Bubble */}
-      <div className={`max-w-[85%] text-[13px] leading-relaxed ${
-        isUser 
-          ? "bg-[var(--btn-bg)] text-[var(--text-primary)] border border-[var(--border-hover)] rounded-2xl rounded-tr-sm px-4 py-2.5 shadow-sm" 
+      <div className={`max-w-[85%] min-w-0 text-[13px] leading-relaxed ${
+        isUser
+          ? "bg-[var(--btn-bg)] text-[var(--text-primary)] border border-[var(--border-hover)] rounded-2xl rounded-tr-sm px-4 py-2.5 shadow-sm"
           : "text-[var(--text-secondary)] py-1.5"
       }`}>
         {isUser ? (
@@ -106,6 +121,10 @@ function MessageBubble({ message }: { message: Message }) {
         ) : (
           <div className="text-[13px]">
             <MarkdownPreview content={message.content} compact />
+            {message.chain && <ReasoningChain chain={message.chain} />}
+            {message.evidence && message.evidence.length > 0 && (
+              <CitationChips evidence={message.evidence} onJump={onJumpToSource} />
+            )}
           </div>
         )}
       </div>
@@ -117,9 +136,10 @@ interface ChatPanelProps {
   initialDocId: string;            // file the chat was opened from (seeds scope)
   onClose: () => void;
   onDocumentEdited?: () => void;
+  onJumpToSource?: (ev: Evidence) => void;
 }
 
-export default function ChatPanel({ initialDocId, onClose, onDocumentEdited }: ChatPanelProps) {
+export default function ChatPanel({ initialDocId, onClose, onDocumentEdited, onJumpToSource }: ChatPanelProps) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [streaming, setStreaming] = useState(false);
@@ -131,6 +151,20 @@ export default function ChatPanel({ initialDocId, onClose, onDocumentEdited }: C
   const [scopeDocIds, setScopeDocIds] = useState<string[]>([initialDocId]);
   const [allDocs, setAllDocs] = useState<DocSummary[]>([]);
   const [scopeMenuOpen, setScopeMenuOpen] = useState(false);
+
+  // Demo mode — surfaces the RAG-vs-GraphRAG compare tool. Persisted locally.
+  const [demoMode, setDemoMode] = useState<boolean>(() => {
+    try { return localStorage.getItem(DEMO_MODE_KEY) === "1"; } catch { return false; }
+  });
+  const [compareOpen, setCompareOpen] = useState(false);
+  const [compareLoading, setCompareLoading] = useState(false);
+  const [compareError, setCompareError] = useState<string | null>(null);
+  const [compareResult, setCompareResult] = useState<CompareResult | null>(null);
+  const [compareQuestion, setCompareQuestion] = useState("");
+
+  useEffect(() => {
+    try { localStorage.setItem(DEMO_MODE_KEY, demoMode ? "1" : "0"); } catch { /* ignore */ }
+  }, [demoMode]);
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -253,6 +287,8 @@ export default function ChatPanel({ initialDocId, onClose, onDocumentEdited }: C
           role: h.role,
           content: h.content,
           sessionId: h.session_id,
+          evidence: h.evidence,
+          chain: h.chain,
         }));
         setMessages(msgs);
         setSessionId(Math.max(...history.map(h => h.session_id)));
@@ -283,11 +319,24 @@ export default function ChatPanel({ initialDocId, onClose, onDocumentEdited }: C
     setStreaming(true);
 
     try {
-      await streamChat(scopeDocIds, question, (token) => {
-        setMessages((prev) =>
-          prev.map((m) => m.id === assistantMsg.id ? { ...m, content: m.content + token } : m)
-        );
-      }, sessionId, onDocumentEdited);
+      await streamChat(scopeDocIds, question, {
+        onChunk: (token) => {
+          setMessages((prev) =>
+            prev.map((m) => m.id === assistantMsg.id ? { ...m, content: m.content + token } : m)
+          );
+        },
+        onEvidence: (evidence) => {
+          setMessages((prev) =>
+            prev.map((m) => m.id === assistantMsg.id ? { ...m, evidence } : m)
+          );
+        },
+        onChain: (chain) => {
+          setMessages((prev) =>
+            prev.map((m) => m.id === assistantMsg.id ? { ...m, chain } : m)
+          );
+        },
+        onEdited: onDocumentEdited,
+      }, sessionId);
     } catch (err) {
       setError(String(err));
       setMessages((prev) => prev.filter((m) => m.id !== assistantMsg.id));
@@ -303,6 +352,32 @@ export default function ChatPanel({ initialDocId, onClose, onDocumentEdited }: C
     if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendMessage(); }
   };
 
+  // Run the RAG-vs-GraphRAG compare on the current input, or the last question asked.
+  const runComparison = useCallback(async () => {
+    const lastUser = [...visibleMessages].reverse().find((m) => m.role === "user");
+    const question = input.trim() || lastUser?.content?.trim() || "";
+    if (!question) {
+      setCompareError("Type a question (or ask one first) to compare.");
+      setCompareQuestion("");
+      setCompareResult(null);
+      setCompareOpen(true);
+      return;
+    }
+    setCompareQuestion(question);
+    setCompareResult(null);
+    setCompareError(null);
+    setCompareLoading(true);
+    setCompareOpen(true);
+    try {
+      const result = await compareRetrieval(scopeDocIds[0], question);
+      setCompareResult(result);
+    } catch (e) {
+      setCompareError(String(e));
+    } finally {
+      setCompareLoading(false);
+    }
+  }, [scopeDocIds, input, visibleMessages]);
+
   return (
     <div className="flex flex-col h-full bg-[var(--surface)] relative overflow-hidden">
       {/* Header */}
@@ -313,23 +388,20 @@ export default function ChatPanel({ initialDocId, onClose, onDocumentEdited }: C
             Chat with Document
           </span>
         </div>
-        <div className="flex gap-1">
-          {/* <button
-            onClick={async () => {
-              try {
-                await clearChatHistory(docId);
-                setMessages([]);
-                setError(null);
-                setSessionId(1);
-              } catch (e) {
-                setError(String(e));
-              }
-            }}
-            title="Clear conversation"
-            className="btn-icon"
+        <div className="flex items-center gap-1">
+          {/* Demo mode toggle — reveals the RAG-vs-GraphRAG compare tool */}
+          <button
+            onClick={() => setDemoMode((v) => !v)}
+            title={demoMode ? "Demo mode on — hides the compare tool when off" : "Demo mode off — turn on to compare RAG vs GraphRAG"}
+            className={`inline-flex items-center gap-1 px-2 py-1 rounded-md text-[10px] font-medium uppercase tracking-wide transition-all border ${
+              demoMode
+                ? "text-[var(--accent-text)] bg-[var(--accent-subtle)] border-[var(--border-glow)]"
+                : "text-[var(--text-faint)] bg-transparent border-[var(--border)] hover:text-[var(--text-muted)]"
+            }`}
           >
-            <IconTrash />
-          </button> */}
+            <IconScale />
+            Demo
+          </button>
           <button onClick={onClose} title="Close chat" className="btn-icon">
             <IconX />
           </button>
@@ -484,7 +556,7 @@ export default function ChatPanel({ initialDocId, onClose, onDocumentEdited }: C
         )}
 
         {visibleMessages.map((msg) => (
-          <MessageBubble key={msg.id} message={msg} />
+          <MessageBubble key={msg.id} message={msg} onJumpToSource={onJumpToSource} />
         ))}
 
         {error && (
@@ -497,24 +569,37 @@ export default function ChatPanel({ initialDocId, onClose, onDocumentEdited }: C
       {/* Input Area (Floating) */}
       <div className="absolute bottom-0 left-0 right-0 px-4 pb-4 pt-12 bg-gradient-to-t from-[var(--surface)] via-[var(--surface)] to-transparent pointer-events-none">
         <div className="flex flex-col gap-2 max-w-2xl mx-auto pointer-events-auto">
-          {/* New Session Button */}
-          {messages.length > 0 && (
-            <div className="flex justify-center mb-1">
-              <button
-                onClick={async () => {
-                  try {
-                    const newId = await startNewSession();
-                    setSessionId(newId);
-                  } catch (e) {
-                    setError(String(e));
-                  }
-                }}
-                className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-[var(--surface-alt)] border border-[var(--border-strong)] text-[11px] text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:border-[var(--border-hover)] transition-all scale-in shadow-sm hover:shadow-md"
-                title="Start a new session with fresh context"
-              >
-                <IconPlus />
-                <span>New Topic</span>
-              </button>
+          {/* Action row — New Topic + (demo) Compare RAG vs GraphRAG */}
+          {(messages.length > 0 || demoMode) && (
+            <div className="flex justify-center gap-2 mb-1">
+              {messages.length > 0 && (
+                <button
+                  onClick={async () => {
+                    try {
+                      const newId = await startNewSession();
+                      setSessionId(newId);
+                    } catch (e) {
+                      setError(String(e));
+                    }
+                  }}
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-[var(--surface-alt)] border border-[var(--border-strong)] text-[11px] text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:border-[var(--border-hover)] transition-all scale-in shadow-sm hover:shadow-md"
+                  title="Start a new session with fresh context"
+                >
+                  <IconPlus />
+                  <span>New Topic</span>
+                </button>
+              )}
+              {demoMode && (
+                <button
+                  onClick={runComparison}
+                  disabled={streaming || compareLoading}
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-[var(--accent-subtle)] border border-[var(--border-glow)] text-[11px] text-[var(--accent-text)] hover:brightness-110 transition-all scale-in shadow-sm hover:shadow-md disabled:opacity-50 disabled:cursor-not-allowed"
+                  title="Answer the current question with plain RAG and with GraphRAG, side by side"
+                >
+                  <IconScale />
+                  <span>Compare RAG vs GraphRAG</span>
+                </button>
+              )}
             </div>
           )}
 
@@ -555,6 +640,17 @@ export default function ChatPanel({ initialDocId, onClose, onDocumentEdited }: C
           </p>
         </div>
       </div>
+
+      {/* RAG vs GraphRAG compare overlay (demo mode) */}
+      {compareOpen && (
+        <CompareDrawer
+          question={compareQuestion}
+          loading={compareLoading}
+          error={compareError}
+          result={compareResult}
+          onClose={() => setCompareOpen(false)}
+        />
+      )}
     </div>
   );
 }

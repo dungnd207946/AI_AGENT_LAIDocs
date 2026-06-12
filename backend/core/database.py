@@ -82,6 +82,29 @@ _MIGRATIONS = [
     FOREIGN KEY (message_id) REFERENCES chat_messages(id) ON DELETE CASCADE
 )""",
     "CREATE INDEX IF NOT EXISTS idx_chat_message_evidence_doc ON chat_message_evidence(doc_id)",
+    # Graph-of-thought reasoning chain produced by reason_over_graph for an
+    # assistant message, so the UI can re-render the chain on history reload.
+    """CREATE TABLE IF NOT EXISTS chat_message_chains (
+    message_id INTEGER PRIMARY KEY,
+    doc_id TEXT NOT NULL,
+    chain TEXT NOT NULL DEFAULT '',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (message_id) REFERENCES chat_messages(id) ON DELETE CASCADE
+)""",
+    "CREATE INDEX IF NOT EXISTS idx_chat_message_chains_doc ON chat_message_chains(doc_id)",
+    # Knowledge-graph triple cache, one row per retrieval unit (mirrors
+    # document_embeddings). ``triples`` is a JSON list of [subject, relation,
+    # object]; ``unit_hash`` + ``model`` invalidate stale rows when the unit's
+    # content or the extractor LLM changes, so only changed units are re-extracted.
+    """CREATE TABLE IF NOT EXISTS document_graph_units (
+    doc_id TEXT NOT NULL,
+    unit_id TEXT NOT NULL,
+    unit_hash TEXT NOT NULL DEFAULT '',
+    model TEXT NOT NULL DEFAULT '',
+    triples TEXT NOT NULL DEFAULT '[]',
+    PRIMARY KEY (doc_id, unit_id)
+)""",
+    "CREATE INDEX IF NOT EXISTS idx_doc_graph_units_doc_model ON document_graph_units(doc_id, model)",
     # NOTE: the 'summary' role + nullable-doc_id table rebuild used to live here
     # as four destructive statements (CREATE _v2 / INSERT / DROP / RENAME). That
     # was a bug: _MIGRATIONS runs on EVERY startup, so on each restart it
@@ -164,6 +187,7 @@ def init_db() -> None:
             except sqlite3.OperationalError:
                 pass  # column already exists or table already recreated
         _run_guarded_migrations(conn)
+        _repair_dangling_chat_fk(conn)
         conn.commit()
 
 
@@ -183,6 +207,74 @@ def _run_guarded_migrations(conn: sqlite3.Connection) -> None:
         for stmt in statements:
             conn.execute(stmt)
         conn.execute("INSERT INTO schema_migrations (name) VALUES (?)", (name,))
+
+
+def _repair_dangling_chat_fk(conn: sqlite3.Connection) -> None:
+    """Rebuild chat_message_* tables whose FK was rewritten to chat_messages_old.
+
+    A historical RENAME-based migration of chat_messages (run with the default
+    legacy_alter_table=OFF) silently rewrote the foreign keys of dependent
+    tables to point at chat_messages_old, which was then dropped — leaving a
+    dangling reference that makes every INSERT raise
+    'no such table: main.chat_messages_old'. Recreate the affected table with
+    the FK pointing back at chat_messages, preserving existing rows.
+    """
+    targets = {
+        "chat_message_evidence": """CREATE TABLE chat_message_evidence (
+    message_id INTEGER NOT NULL,
+    doc_id TEXT NOT NULL,
+    unit_id TEXT NOT NULL,
+    unit_hash TEXT NOT NULL,
+    title TEXT,
+    kind TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (message_id, unit_id),
+    FOREIGN KEY (message_id) REFERENCES chat_messages(id) ON DELETE CASCADE
+)""",
+        "chat_message_chains": """CREATE TABLE chat_message_chains (
+    message_id INTEGER PRIMARY KEY,
+    doc_id TEXT NOT NULL,
+    chain TEXT NOT NULL DEFAULT '',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (message_id) REFERENCES chat_messages(id) ON DELETE CASCADE
+)""",
+    }
+
+    needs_repair = []
+    for name in targets:
+        row = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name=?", (name,)
+        ).fetchone()
+        if row and "chat_messages_old" in (row[0] or ""):
+            needs_repair.append(name)
+    if not needs_repair:
+        return
+
+    conn.execute("PRAGMA foreign_keys=OFF")
+    conn.execute("PRAGMA legacy_alter_table=ON")
+    try:
+        for name in needs_repair:
+            cols = [
+                r[1] for r in conn.execute(f"PRAGMA table_info({name})").fetchall()
+            ]
+            col_list = ", ".join(cols)
+            conn.execute(f"ALTER TABLE {name} RENAME TO {name}_fix_old")
+            conn.execute(targets[name])
+            conn.execute(
+                f"INSERT INTO {name} ({col_list}) SELECT {col_list} FROM {name}_fix_old"
+            )
+            conn.execute(f"DROP TABLE {name}_fix_old")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_chat_message_evidence_doc "
+            "ON chat_message_evidence(doc_id)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_chat_message_chains_doc "
+            "ON chat_message_chains(doc_id)"
+        )
+    finally:
+        conn.execute("PRAGMA legacy_alter_table=OFF")
+        conn.execute("PRAGMA foreign_keys=ON")
 
 
 # ---------------------------------------------------------------------------

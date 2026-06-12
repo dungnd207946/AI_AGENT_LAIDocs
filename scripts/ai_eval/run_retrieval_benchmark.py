@@ -123,7 +123,9 @@ def _live_ranked(variant: str, doc_id: str, question: str, settings, units):
     elif variant == "hybrid":
         out, _ = r.hybrid_rank(doc_id, question, settings, units=units)
     elif variant == "graph":
-        out = kg.graph_augmented_units(doc_id, question, settings, units=units)
+        # Cache-backed path — the same one the live agent's hybrid fusion uses
+        # (persisted triples; builds incrementally on first call, fast after).
+        out = kg.graph_augmented_units_cached(doc_id, question, settings)
     else:
         raise SystemExit(f"Unknown variant: {variant}")
     return out, time.perf_counter() - t0

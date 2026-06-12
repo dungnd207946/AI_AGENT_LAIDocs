@@ -338,8 +338,25 @@ def build_context_from_units(units: list[dict]) -> str:
     return ctx.strip()
 
 
+def _evidence_preview(unit: dict, *, limit: int = 220) -> str:
+    """One-line snippet of a unit's text for citation hover/preview (no newlines)."""
+    text = " ".join(str(unit.get("text") or "").split())
+    return text[:limit] + ("…" if len(text) > limit else "")
+
+
+def _evidence_heading_path(unit: dict) -> list[str]:
+    raw = unit.get("heading_path") or []
+    if not isinstance(raw, list):
+        raw = [str(raw)]
+    return [str(item).strip() for item in raw if str(item).strip()]
+
+
 def evidence_from_units(units: list[dict]) -> list[dict]:
-    """Return stable evidence metadata for retrieved units."""
+    """Return stable evidence metadata for retrieved units.
+
+    Includes ``heading_path`` and a one-line ``preview`` so the UI can render
+    citation chips and jump-to-source without a second backend round trip.
+    """
     evidence: list[dict] = []
     seen: set[str] = set()
     for unit in units:
@@ -353,6 +370,8 @@ def evidence_from_units(units: list[dict]) -> list[dict]:
                 "unit_hash": _compute_unit_hash(unit),
                 "title": unit.get("title") or "",
                 "kind": unit.get("kind") or "text",
+                "heading_path": _evidence_heading_path(unit),
+                "preview": _evidence_preview(unit),
             }
         )
     return evidence
@@ -821,6 +840,43 @@ def rrf_fuse(ranked_lists: list[list[str]], k: int = _RRF_K,
 
 
 # ---------------------------------------------------------------------------
+# Graph retrieval (GraphRAG) — one more ranked list for the fusion
+# ---------------------------------------------------------------------------
+
+
+def graph_search(
+    doc_id: str,
+    question: str,
+    settings: Settings,
+    units: list[dict] | None = None,
+    top_k: int = _PER_RETRIEVER_TOP_K,
+) -> list[str]:
+    """Rank units by an entity-relation graph walk from the question's entities.
+
+    Surfaces passages connected through the knowledge graph even when no single
+    passage matches lexically/densely (the multi-hop "X founded by Y who created
+    Z" case). Backed by a persistent triple cache so it costs ~one LLM call per
+    query. No-op (``[]``) when GraphRAG is disabled, no LLM is configured, or
+    nothing connects — so it never harms the existing pipeline.
+    """
+    cfg = settings.active_graph_rag
+    if not cfg.enabled or not is_llm_configured(settings.active_llm):
+        return []
+
+    from . import knowledge_graph as kg  # local import avoids circular import
+
+    ids = kg.graph_augmented_units_cached(doc_id, question, settings, hops=cfg.hops)
+    if not ids:
+        return []
+
+    if units is not None:
+        valid = {str(u.get("unit_id") or "") for u in units}
+        ids = [uid for uid in ids if uid in valid]
+    limit = min(top_k, cfg.max_units) if cfg.max_units else top_k
+    return ids[:limit]
+
+
+# ---------------------------------------------------------------------------
 # Hybrid ranking (single query → fused unit_ids)
 # ---------------------------------------------------------------------------
 
@@ -880,6 +936,13 @@ def hybrid_rank(
             ranked_lists.append(dense)
     except Exception:
         logger.exception("Dense retrieval failed for doc %s", doc_id)
+
+    try:
+        graph_ids = graph_search(doc_id, question, settings, units=units, top_k=retriever_top_k)
+        if graph_ids:
+            ranked_lists.append(graph_ids)
+    except Exception:
+        logger.exception("Graph retrieval failed for doc %s", doc_id)
 
     if not ranked_lists:
         return [], tree_selected

@@ -18,12 +18,28 @@ from urllib.parse import urlparse
 from fastapi import APIRouter, BackgroundTasks, File, Form, HTTPException, Response, UploadFile
 from pydantic import BaseModel
 
+from ..core.config import get_settings
 from ..core.database import get_db, invalidate_document_embeddings
 from ..core.vault import vault, ASSETS_DIR
+from ..services import knowledge_graph as kg
 from ..services.converter import DoclingConverter
 from ..services.crawler import WebCrawler
 from ..services.document_store import rebuild_tree_index
 from ..services.tree_index import build_tree_index
+
+
+async def _build_graph_index(doc_id: str) -> None:
+    """Proactively build the GraphRAG triple cache once a doc's tree is ready.
+
+    Runs in the ingest background task (after the tree index, which the graph's
+    retrieval units depend on). Best-effort: gated on config, never raises, so
+    graph retrieval simply stays a no-op if extraction is unavailable.
+    """
+    try:
+        if get_settings().active_graph_rag.enabled:
+            await kg.ensure_graph_index_async(doc_id)
+    except Exception:
+        pass
 
 
 def _sse(stage: str, **extra) -> str:
@@ -228,6 +244,8 @@ async def upload_document(
                             (json.dumps(tree, ensure_ascii=False), doc_id),
                         )
                     invalidate_document_embeddings(doc_id)
+                # GraphRAG triple cache depends on the (now-current) retrieval units.
+                await _build_graph_index(doc_id)
 
             background_tasks.add_task(_build_and_store_tree, meta.doc_id, markdown)
 
@@ -317,6 +335,7 @@ async def crawl_url(background_tasks: BackgroundTasks, body: CrawlRequest):
                             (json.dumps(tree, ensure_ascii=False), doc_id),
                         )
                     invalidate_document_embeddings(doc_id)
+                await _build_graph_index(doc_id)
 
             background_tasks.add_task(_build_and_store_tree_crawl, meta.doc_id, markdown)
 

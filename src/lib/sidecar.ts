@@ -49,13 +49,31 @@ export async function apiDelete<T>(path: string): Promise<T> {
 
 // ── Streaming chat (SSE) ──────────────────────────────────────────
 
+/** A document unit cited as the source for an assistant answer. */
+export interface Evidence {
+  unit_id: string;
+  title: string;
+  kind: "text" | "image" | "table" | string;
+  heading_path: string[];
+  preview: string;
+}
+
+export interface StreamHandlers {
+  onChunk: (text: string) => void;
+  onEdited?: () => void;
+  /** Citation evidence emitted once the answer is grounded. */
+  onEvidence?: (evidence: Evidence[]) => void;
+  /** Graph-of-thought reasoning chain (multi-hop questions). */
+  onChain?: (chain: string) => void;
+}
+
 export async function streamChat(
   docIds: string[],
   question: string,
-  onChunk: (text: string) => void,
+  handlers: StreamHandlers,
   sessionId?: number,
-  onEdited?: () => void,
 ): Promise<void> {
+  const { onChunk, onEdited, onEvidence, onChain } = handlers;
   const res = await fetch(`${API_BASE}/api/chat/stream`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -90,6 +108,14 @@ export async function streamChat(
           onEdited?.();
           continue;
         }
+        if (payload.startsWith("[EVIDENCE] ")) {
+          try { onEvidence?.(JSON.parse(payload.slice(11)) as Evidence[]); } catch { /* ignore */ }
+          continue;
+        }
+        if (payload.startsWith("[CHAIN] ")) {
+          try { onChain?.(JSON.parse(payload.slice(8)) as string); } catch { /* ignore */ }
+          continue;
+        }
         if (payload.startsWith("[ERROR]")) throw new Error(payload.slice(8));
         // Tokens are plain text with escaped newlines
         onChunk(payload.replace(/\\n/g, "\n"));
@@ -113,6 +139,25 @@ export async function listDocuments(): Promise<DocSummary[]> {
   return apiGet<DocSummary[]>(`/api/documents/`);
 }
 
+// ── RAG vs GraphRAG compare (demo) ────────────────────────────────
+
+export interface CompareArm {
+  answer: string;
+  units: Evidence[];
+}
+
+export interface CompareResult {
+  doc_id: string;
+  question: string;
+  rag: CompareArm;
+  graph: CompareArm;
+  bridge_unit_ids: string[];
+}
+
+export async function compareRetrieval(docId: string, question: string): Promise<CompareResult> {
+  return apiPost<CompareResult>("/api/chat/compare", { doc_id: docId, question });
+}
+
 // ── Chat history & session management (global sessions) ───────────
 
 export interface ChatMessage {
@@ -121,6 +166,8 @@ export interface ChatMessage {
   role: "user" | "assistant";
   content: string;
   created_at: string;
+  evidence?: Evidence[];
+  chain?: string;
 }
 
 export async function getChatHistory(): Promise<ChatMessage[]> {
