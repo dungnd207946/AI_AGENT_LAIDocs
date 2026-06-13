@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect, useCallback, useMemo } from "react";
-import { streamChat, getChatHistory, startNewSession, clearChatHistory, deleteSession, listDocuments, compareRetrieval } from "../lib/sidecar";
-import type { Evidence, CompareResult, DocSummary } from "../lib/sidecar";
+import { streamChat, resumeChat, getChatHistory, startNewSession, clearChatHistory, deleteSession, listDocuments, compareRetrieval } from "../lib/sidecar";
+import type { Evidence, CompareResult, DocSummary, EditConfirmation, StreamHandlers } from "../lib/sidecar";
 import MarkdownPreview from "./MarkdownPreview";
 import CitationChips from "./CitationChips";
 import ReasoningChain from "./ReasoningChain";
@@ -14,6 +14,8 @@ interface Message {
   sessionId?: number;
   evidence?: Evidence[];
   chain?: string;
+  /** Set when the turn paused at an edit-confirmation gate; cleared on resolve. */
+  pending?: EditConfirmation;
 }
 
 const DEMO_MODE_KEY = "laidocs-demo-mode";
@@ -92,7 +94,71 @@ const IconScale = () => (
   </svg>
 );
 
-function MessageBubble({ message, onJumpToSource }: { message: Message; onJumpToSource?: (ev: Evidence) => void }) {
+function EditConfirmCard({
+  confirmation,
+  busy,
+  onApprove,
+  onReject,
+}: {
+  confirmation: EditConfirmation;
+  busy: boolean;
+  onApprove: () => void;
+  onReject: () => void;
+}) {
+  const isDelete = confirmation.action === "DELETE";
+  return (
+    <div className="mt-2 rounded-xl border border-[var(--border-glow)] bg-[var(--accent-subtle)] overflow-hidden">
+      <div className="px-3 py-2 border-b border-[var(--border-glow)] flex items-center gap-2">
+        <span className="text-[10px] font-semibold uppercase tracking-wide text-[var(--accent-text)]">
+          {isDelete ? "Confirm deletion" : "Confirm edit"}
+        </span>
+        <span className="text-[10px] text-[var(--text-faint)] truncate">in {confirmation.file}</span>
+      </div>
+      <div className="px-3 py-2 space-y-1.5">
+        <div>
+          <div className="text-[9px] uppercase tracking-wide text-[var(--text-faint)] mb-0.5">Remove</div>
+          <pre className="m-0 text-[11px] whitespace-pre-wrap break-words text-[var(--error)] bg-[var(--error-bg)] rounded px-2 py-1 max-h-32 overflow-auto">{confirmation.old_string}</pre>
+        </div>
+        {!isDelete && (
+          <div>
+            <div className="text-[9px] uppercase tracking-wide text-[var(--text-faint)] mb-0.5">Replace with</div>
+            <pre className="m-0 text-[11px] whitespace-pre-wrap break-words text-[var(--text-primary)] bg-[var(--surface-alt)] rounded px-2 py-1 max-h-32 overflow-auto">{confirmation.new_string}</pre>
+          </div>
+        )}
+      </div>
+      <div className="px-3 py-2 flex items-center justify-end gap-2 border-t border-[var(--border-glow)]">
+        <button
+          onClick={onReject}
+          disabled={busy}
+          className="px-3 py-1 rounded-md text-[11px] font-medium border border-[var(--border)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:border-[var(--border-hover)] transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+        >
+          Reject
+        </button>
+        <button
+          onClick={onApprove}
+          disabled={busy}
+          className="px-3 py-1 rounded-md text-[11px] font-medium bg-[var(--accent)] text-white hover:opacity-90 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+        >
+          {busy ? "Applying…" : isDelete ? "Delete" : "Apply edit"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function MessageBubble({
+  message,
+  onJumpToSource,
+  onApproveEdit,
+  onRejectEdit,
+  resolving,
+}: {
+  message: Message;
+  onJumpToSource?: (ev: Evidence) => void;
+  onApproveEdit?: (id: string) => void;
+  onRejectEdit?: (id: string) => void;
+  resolving?: boolean;
+}) {
   const isUser = message.role === "user";
   return (
     <div className={`flex gap-3 fade-in-up w-full ${isUser ? "flex-row-reverse" : "flex-row"}`}>
@@ -127,6 +193,14 @@ function MessageBubble({ message, onJumpToSource }: { message: Message; onJumpTo
             )}
           </div>
         )}
+        {!isUser && message.pending && (
+          <EditConfirmCard
+            confirmation={message.pending}
+            busy={!!resolving}
+            onApprove={() => onApproveEdit?.(message.id)}
+            onReject={() => onRejectEdit?.(message.id)}
+          />
+        )}
       </div>
     </div>
   );
@@ -143,6 +217,7 @@ export default function ChatPanel({ initialDocId, onClose, onDocumentEdited, onJ
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [streaming, setStreaming] = useState(false);
+  const [resolvingEditId, setResolvingEditId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [sessionId, setSessionId] = useState<number>(1);
   const [sessionMenuOpen, setSessionMenuOpen] = useState(false);
@@ -305,6 +380,20 @@ export default function ChatPanel({ initialDocId, onClose, onDocumentEdited, onJ
     return () => window.removeEventListener("keydown", handleEsc);
   }, [onClose]);
 
+  // Shared SSE handlers that funnel a turn's output into one assistant bubble.
+  // Used by both the initial question (streamChat) and a resumed edit (resumeChat).
+  const makeHandlers = useCallback((assistantId: string): StreamHandlers => ({
+    onChunk: (token) =>
+      setMessages((prev) => prev.map((m) => m.id === assistantId ? { ...m, content: m.content + token } : m)),
+    onEvidence: (evidence) =>
+      setMessages((prev) => prev.map((m) => m.id === assistantId ? { ...m, evidence } : m)),
+    onChain: (chain) =>
+      setMessages((prev) => prev.map((m) => m.id === assistantId ? { ...m, chain } : m)),
+    onEdited: () => onDocumentEdited?.(),
+    onInterrupt: (confirmation) =>
+      setMessages((prev) => prev.map((m) => m.id === assistantId ? { ...m, pending: confirmation } : m)),
+  }), [onDocumentEdited]);
+
   const sendMessage = useCallback(async () => {
     const question = input.trim();
     if (!question || streaming) return;
@@ -319,24 +408,7 @@ export default function ChatPanel({ initialDocId, onClose, onDocumentEdited, onJ
     setStreaming(true);
 
     try {
-      await streamChat(scopeDocIds, question, {
-        onChunk: (token) => {
-          setMessages((prev) =>
-            prev.map((m) => m.id === assistantMsg.id ? { ...m, content: m.content + token } : m)
-          );
-        },
-        onEvidence: (evidence) => {
-          setMessages((prev) =>
-            prev.map((m) => m.id === assistantMsg.id ? { ...m, evidence } : m)
-          );
-        },
-        onChain: (chain) => {
-          setMessages((prev) =>
-            prev.map((m) => m.id === assistantMsg.id ? { ...m, chain } : m)
-          );
-        },
-        onEdited: onDocumentEdited,
-      }, sessionId);
+      await streamChat(scopeDocIds, question, makeHandlers(assistantMsg.id), sessionId);
     } catch (err) {
       setError(String(err));
       setMessages((prev) => prev.filter((m) => m.id !== assistantMsg.id));
@@ -346,7 +418,28 @@ export default function ChatPanel({ initialDocId, onClose, onDocumentEdited, onJ
       );
       setStreaming(false);
     }
-  }, [scopeDocIds, input, streaming, sessionId, onDocumentEdited]);
+  }, [scopeDocIds, input, streaming, sessionId, makeHandlers]);
+
+  // Approve/reject an edit the agent paused on (apply_edit interrupt). Resumes
+  // the SAME turn: tokens/edits append to the same assistant bubble; the
+  // confirmation card is cleared once we send the decision.
+  const resolveEdit = useCallback(async (messageId: string, decision: "approve" | "reject") => {
+    if (resolvingEditId) return;
+    setResolvingEditId(messageId);
+    setMessages((prev) =>
+      prev.map((m) => m.id === messageId ? { ...m, pending: undefined, streaming: true } : m)
+    );
+    try {
+      await resumeChat(scopeDocIds, decision, makeHandlers(messageId), sessionId);
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setMessages((prev) =>
+        prev.map((m) => m.id === messageId ? { ...m, streaming: false } : m)
+      );
+      setResolvingEditId(null);
+    }
+  }, [scopeDocIds, sessionId, resolvingEditId, makeHandlers]);
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendMessage(); }
@@ -556,7 +649,14 @@ export default function ChatPanel({ initialDocId, onClose, onDocumentEdited, onJ
         )}
 
         {visibleMessages.map((msg) => (
-          <MessageBubble key={msg.id} message={msg} onJumpToSource={onJumpToSource} />
+          <MessageBubble
+            key={msg.id}
+            message={msg}
+            onJumpToSource={onJumpToSource}
+            onApproveEdit={(id) => resolveEdit(id, "approve")}
+            onRejectEdit={(id) => resolveEdit(id, "reject")}
+            resolving={resolvingEditId === msg.id}
+          />
         ))}
 
         {error && (
