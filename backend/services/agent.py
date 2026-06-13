@@ -5,8 +5,8 @@ LLM providers (Gemini, OpenAI-compatible, Anthropic).
 
 Memory:
   - Conversation memory: durable AsyncSqliteSaver checkpointer
-    (~/.laidocs/data/checkpoints.db) — survives restarts, keyed per session
-    via thread_id "doc-{doc_id}-s{session_id}"
+    (~/.laidocs/data/checkpoints.db) — survives restarts, keyed per global
+    session via thread_id "session-{session_id}"
   - Durable preference memory: ~/.laidocs/memories/preferences.md (read at
     agent build time; injected into the system prompt)
 
@@ -329,7 +329,19 @@ def retrieve_context(question: str) -> str:
     if not doc_ids or not settings:
         return "Error: Document context not configured."
 
-    context = retrieval.agentic_retrieve_context_multi(doc_ids, question, settings)
+    context, evidence = retrieval.agentic_retrieve_context_multi_with_evidence(
+        doc_ids, question, settings
+    )
+    # Record retrieved units so the stream can emit citation chips ([EVIDENCE]).
+    # Accumulates across multiple retrieve_context calls within one turn,
+    # de-duplicated by unit_id.
+    if evidence:
+        existing = ctx.setdefault("retrieved_units", [])
+        seen = {item.get("unit_id") for item in existing if isinstance(item, dict)}
+        for item in evidence:
+            if item.get("unit_id") not in seen:
+                existing.append(item)
+                seen.add(item.get("unit_id"))
     if context:
         return context
     return "No relevant sections found in the selected documents for this question."

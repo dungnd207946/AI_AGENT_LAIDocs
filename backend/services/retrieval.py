@@ -1328,38 +1328,40 @@ def agentic_retrieve_context(
     return context
 
 
-def agentic_retrieve_context_multi(
+def agentic_retrieve_context_multi_with_evidence(
     doc_ids: list[str],
     question: str,
     settings: Settings | None = None,
     max_rounds: int = MAX_RETRIEVAL_ROUNDS,
-) -> str:
-    """Iterative multi-hop retrieval over a POOL of several documents.
+) -> tuple[str, list[dict]]:
+    """Pooled multi-doc agentic retrieval returning context AND citation evidence.
 
-    Mirrors agentic_retrieve_context() but ranks all selected docs as one pool
-    via hybrid_rank_multi (units namespaced by doc). Unlike the single-doc
-    path, it never falls back to a raw whole-document dump (there is no single
-    "the document"): when nothing is retrieved it returns "" — preserving the
-    anti-hallucination contract for out-of-scope questions.
+    Mirrors agentic_retrieve_context_with_evidence() but ranks all selected docs
+    as one pool via hybrid_rank_multi (units namespaced by doc). Unlike the
+    single-doc path, it never falls back to a raw whole-document dump (there is
+    no single "the document"): when nothing is retrieved it returns ``("", [])``
+    — preserving the anti-hallucination contract for out-of-scope questions.
+
+    The evidence list (one entry per selected unit, with ``heading_path`` +
+    ``preview``) drives the UI citation chips and jump-to-source.
     """
     settings = settings or get_settings()
     doc_ids = [d for d in doc_ids if d]
     if not doc_ids:
-        return ""
+        return "", []
 
     units = get_retrieval_units_multi(doc_ids)
     if not units:
-        return ""
+        return "", []
     unit_map = {u["unit_id"]: u for u in units}
 
     # No LLM: single-shot pooled lexical/dense retrieval, no critique loop.
     if not is_llm_configured(settings.active_llm):
         fused, _ = hybrid_rank_multi(doc_ids, question, settings, units=units)
         if not fused:
-            return ""
-        return build_context_from_units(
-            [unit_map[uid] for uid in fused if uid in unit_map]
-        )
+            return "", []
+        selected = [unit_map[uid] for uid in fused if uid in unit_map]
+        return build_context_from_units(selected), evidence_from_units(selected)
 
     accumulated: dict[str, float] = {}
     seen_queries: set[str] = set()
@@ -1388,7 +1390,7 @@ def agentic_retrieve_context_multi(
                     accumulated[uid] = score
 
         if not accumulated and first_round_empty_tree_only:
-            return ""
+            return "", []
         if not accumulated:
             break
 
@@ -1408,8 +1410,21 @@ def agentic_retrieve_context_multi(
         queries = verdict["followups"]
 
     if not accumulated:
-        return ""
+        return "", []
 
     ordered = sorted(accumulated.items(), key=lambda x: x[1], reverse=True)
     selected = [unit_map[uid] for uid, _ in ordered[:MAX_ACCUMULATED_UNITS]]
-    return build_context_from_units(selected)
+    return build_context_from_units(selected), evidence_from_units(selected)
+
+
+def agentic_retrieve_context_multi(
+    doc_ids: list[str],
+    question: str,
+    settings: Settings | None = None,
+    max_rounds: int = MAX_RETRIEVAL_ROUNDS,
+) -> str:
+    """Pooled multi-doc agentic retrieval → context string only."""
+    context, _evidence = agentic_retrieve_context_multi_with_evidence(
+        doc_ids, question, settings, max_rounds=max_rounds
+    )
+    return context
