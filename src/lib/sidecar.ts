@@ -58,6 +58,15 @@ export interface Evidence {
   preview: string;
 }
 
+/** Payload of an edit-confirmation gate: the agent paused before writing. */
+export interface EditConfirmation {
+  type: "edit_confirmation";
+  file: string;
+  action: "REPLACE" | "DELETE" | string;
+  old_string: string;
+  new_string: string;
+}
+
 export interface StreamHandlers {
   onChunk: (text: string) => void;
   onEdited?: () => void;
@@ -65,21 +74,13 @@ export interface StreamHandlers {
   onEvidence?: (evidence: Evidence[]) => void;
   /** Graph-of-thought reasoning chain (multi-hop questions). */
   onChain?: (chain: string) => void;
+  /** The turn paused at an edit-confirmation gate; resolve via resumeChat. */
+  onInterrupt?: (confirmation: EditConfirmation) => void;
 }
 
-export async function streamChat(
-  docIds: string[],
-  question: string,
-  handlers: StreamHandlers,
-  sessionId?: number,
-): Promise<void> {
-  const { onChunk, onEdited, onEvidence, onChain } = handlers;
-  const res = await fetch(`${API_BASE}/api/chat/stream`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ doc_ids: docIds, question, session_id: sessionId ?? null }),
-  });
-
+/** Read an SSE response body, dispatching sentinels + tokens to handlers. */
+async function consumeChatStream(res: Response, handlers: StreamHandlers): Promise<void> {
+  const { onChunk, onEdited, onEvidence, onChain, onInterrupt } = handlers;
   if (!res.ok || !res.body) {
     throw new Error(`Chat request failed: ${res.status}`);
   }
@@ -116,6 +117,10 @@ export async function streamChat(
           try { onChain?.(JSON.parse(payload.slice(8)) as string); } catch { /* ignore */ }
           continue;
         }
+        if (payload.startsWith("[INTERRUPT] ")) {
+          try { onInterrupt?.(JSON.parse(payload.slice(12)) as EditConfirmation); } catch { /* ignore */ }
+          continue;
+        }
         if (payload.startsWith("[ERROR]")) throw new Error(payload.slice(8));
         // Tokens are plain text with escaped newlines
         onChunk(payload.replace(/\\n/g, "\n"));
@@ -124,6 +129,35 @@ export async function streamChat(
   } finally {
     reader.releaseLock();
   }
+}
+
+export async function streamChat(
+  docIds: string[],
+  question: string,
+  handlers: StreamHandlers,
+  sessionId?: number,
+): Promise<void> {
+  const res = await fetch(`${API_BASE}/api/chat/stream`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ doc_ids: docIds, question, session_id: sessionId ?? null }),
+  });
+  await consumeChatStream(res, handlers);
+}
+
+/** Resume a turn paused at an edit-confirmation gate (apply_edit interrupt). */
+export async function resumeChat(
+  docIds: string[],
+  decision: "approve" | "reject",
+  handlers: StreamHandlers,
+  sessionId?: number,
+): Promise<void> {
+  const res = await fetch(`${API_BASE}/api/chat/resume`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ doc_ids: docIds, decision, session_id: sessionId ?? null }),
+  });
+  await consumeChatStream(res, handlers);
 }
 
 // ── Document list (for the chat scope picker) ─────────────────────

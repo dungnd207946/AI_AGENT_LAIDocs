@@ -33,6 +33,7 @@ from langchain_core.tools import tool
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.prebuilt import create_react_agent
+from langgraph.types import interrupt
 
 from ..core.config import Settings, get_settings, LAIDOCS_HOME
 from ..core.database import get_db
@@ -105,15 +106,23 @@ Treat the relation chains as a map of where to look, not as standalone evidence.
 
 ## Editing the Document
 You CAN edit the document — but ONLY when the user explicitly asks you to change it.
+When they do, perform the edit in the SAME turn:
 
 1. **Infer the target file**: From the user's request and the retrieved context, \
 determine WHICH in-scope file to edit. Pass it as the `file` argument (the name shown \
-in the "[File: ...]" label). If it is ambiguous which file, ASK the user first.
-2. **Preview first**: ALWAYS call `preview_edit` (with `file`, `old_string`, \
-`new_string`) and show the result. NEVER apply without user approval.
-3. **Apply**: Only after explicit approval, call `apply_edit` with the SAME `file` and \
-strings you previewed.
-- `old_string` must come from `retrieve_context` or `preview_edit` — never invent text.
+in the "[File: ...]" label). If it is genuinely ambiguous which file, ASK the user first.
+2. **Call `apply_edit` directly** with `file`, `old_string`, `new_string`. Do NOT ask \
+the user "should I apply this?" or "do you want me to proceed?" in text, and do NOT \
+just describe the change and stop — `apply_edit` itself PAUSES and shows the user the \
+exact diff to approve or reject in the app, then writes the file only on approval. \
+Calling `apply_edit` IS how you ask for confirmation; a text question on top of it is \
+redundant and breaks the flow.
+3. **`preview_edit` is OPTIONAL** — use it only to verify that `old_string` matches a \
+single, unique spot before applying. If you use it, immediately follow with \
+`apply_edit` in the SAME turn. Never end your turn just to ask permission.
+- If the user rejects, the tool tells you so — acknowledge it and do not retry the \
+same edit unless they ask again.
+- `old_string` must come from `retrieve_context` (or `preview_edit`) — never invent text.
 - **Delete** = empty `new_string`. **Add** = use an existing passage as anchor.
 
 ## Generating markdown exports
@@ -500,13 +509,16 @@ def preview_edit(file: str, old_string: str, new_string: str) -> str:
 
 @tool
 async def apply_edit(file: str, old_string: str, new_string: str) -> str:
-    """Apply a previewed, USER-CONFIRMED edit to one in-scope document.
+    """Apply an edit to one in-scope document, gated on the user's approval.
 
-    Only call AFTER `preview_edit` and AFTER the user explicitly approved.
+    Call this when the user asks to change the document. It does NOT mutate the
+    file immediately: it PAUSES the agent and surfaces the exact diff to the
+    user, who must approve or reject it in the app. The document is written only
+    after an explicit approval — so this is always safe to call.
 
     Args:
-        file: Same file you previewed (name as in the "[File: ...]" label).
-        old_string: The exact text to replace (same as previewed).
+        file: Which document to edit (name as in the "[File: ...]" label).
+        old_string: The exact text to replace (from retrieve_context / preview_edit).
         new_string: The replacement text. Empty string deletes the match.
     """
     ctx = _tool_context_var.get()
@@ -523,6 +535,26 @@ async def apply_edit(file: str, old_string: str, new_string: str) -> str:
         return located
 
     start, end = located
+    matched = content[start:end]
+    action = "DELETE" if new_string == "" else "REPLACE"
+    title = (ctx.get("doc_titles") or {}).get(doc_id, doc_id)
+
+    # Hard confirmation gate: pause the graph and hand the diff to the user.
+    # The checkpointer persists the pending state; the chat stream surfaces this
+    # payload as an [INTERRUPT] event and the app resumes us with the decision.
+    # interrupt() returns the value passed to Command(resume=...) on resume.
+    decision = interrupt({
+        "type": "edit_confirmation",
+        "file": title,
+        "action": action,
+        "old_string": matched,
+        "new_string": new_string,
+    })
+
+    # Anything other than an explicit approval cancels the edit untouched.
+    if str(decision).strip().lower() != "approve":
+        return f"Edit rejected by the user — '{title}' was left unchanged."
+
     new_content = content[:start] + new_string + content[end:]
     try:
         await persist_document_content(doc_id, new_content)
@@ -531,7 +563,6 @@ async def apply_edit(file: str, old_string: str, new_string: str) -> str:
 
     ctx["edited"] = True
     ctx["edited_doc_id"] = doc_id
-    title = (ctx.get("doc_titles") or {}).get(doc_id, doc_id)
     return f"Edit applied successfully to '{title}'. The document has been updated."
 
 
