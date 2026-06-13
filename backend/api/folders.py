@@ -153,7 +153,26 @@ def delete_folder(path: str):
         raise HTTPException(status_code=403, detail=str(exc))
 
     with get_db() as db:
-        # Remove documents belonging to this folder (FTS triggers handle cleanup)
-        db.execute("DELETE FROM documents WHERE folder = ?", (path,))
-        # Remove the folder record
-        db.execute("DELETE FROM folders WHERE path = ?", (path,))
+        folder_prefix = f"{path}/%"
+        folder_prefix_windows = f"{path}\\%"
+        rows = db.execute(
+            """SELECT id FROM documents
+               WHERE folder = ? OR folder LIKE ? OR folder LIKE ?""",
+            (path, folder_prefix, folder_prefix_windows),
+        ).fetchall()
+        doc_ids = [row["id"] for row in rows]
+        if doc_ids:
+            placeholders = ",".join("?" for _ in doc_ids)
+            db.execute(
+                f"DELETE FROM document_embeddings WHERE doc_id IN ({placeholders})",
+                doc_ids,
+            )
+
+        db.execute(
+            "DELETE FROM documents WHERE folder = ? OR folder LIKE ? OR folder LIKE ?",
+            (path, folder_prefix, folder_prefix_windows),
+        )
+        db.execute(
+            "DELETE FROM folders WHERE path = ? OR path LIKE ? OR path LIKE ?",
+            (path, folder_prefix, folder_prefix_windows),
+        )

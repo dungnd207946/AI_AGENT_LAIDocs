@@ -2,12 +2,13 @@
 node_modules/
 dist/
 src-tauri/target/
-
+AgenticAI_practices/
 # Python
 __pycache__/
 *.pyc
 *.pyo
 .venv/
+.venv-ai
 *.egg-info/
 build/
 dist/

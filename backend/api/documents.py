@@ -18,11 +18,28 @@ from urllib.parse import urlparse
 from fastapi import APIRouter, BackgroundTasks, File, Form, HTTPException, Response, UploadFile
 from pydantic import BaseModel
 
-from ..core.database import get_db
+from ..core.config import get_settings
+from ..core.database import get_db, invalidate_document_embeddings
 from ..core.vault import vault, ASSETS_DIR
+from ..services import knowledge_graph as kg
 from ..services.converter import DoclingConverter
 from ..services.crawler import WebCrawler
+from ..services.document_store import rebuild_tree_index
 from ..services.tree_index import build_tree_index
+
+
+async def _build_graph_index(doc_id: str) -> None:
+    """Proactively build the GraphRAG triple cache once a doc's tree is ready.
+
+    Runs in the ingest background task (after the tree index, which the graph's
+    retrieval units depend on). Best-effort: gated on config, never raises, so
+    graph retrieval simply stays a no-op if extraction is unavailable.
+    """
+    try:
+        if get_settings().active_graph_rag.enabled:
+            await kg.ensure_graph_index_async(doc_id)
+    except Exception:
+        pass
 
 
 def _sse(stage: str, **extra) -> str:
@@ -213,6 +230,7 @@ async def upload_document(
                         (meta.doc_id, meta.folder, meta.filename, meta.title,
                          meta.source_type, meta.original_path, markdown),
                     )
+                invalidate_document_embeddings(meta.doc_id)
 
             await asyncio.to_thread(_db_save)
 
@@ -225,6 +243,9 @@ async def upload_document(
                             "UPDATE documents SET tree_index=? WHERE id=?",
                             (json.dumps(tree, ensure_ascii=False), doc_id),
                         )
+                    invalidate_document_embeddings(doc_id)
+                # GraphRAG triple cache depends on the (now-current) retrieval units.
+                await _build_graph_index(doc_id)
 
             background_tasks.add_task(_build_and_store_tree, meta.doc_id, markdown)
 
@@ -300,6 +321,7 @@ async def crawl_url(background_tasks: BackgroundTasks, body: CrawlRequest):
                         (meta.doc_id, meta.folder, meta.filename, meta.title,
                          meta.source_type, meta.original_path, markdown),
                     )
+                invalidate_document_embeddings(meta.doc_id)
 
             await asyncio.to_thread(_db_save)
 
@@ -312,6 +334,8 @@ async def crawl_url(background_tasks: BackgroundTasks, body: CrawlRequest):
                             "UPDATE documents SET tree_index=? WHERE id=?",
                             (json.dumps(tree, ensure_ascii=False), doc_id),
                         )
+                    invalidate_document_embeddings(doc_id)
+                await _build_graph_index(doc_id)
 
             background_tasks.add_task(_build_and_store_tree_crawl, meta.doc_id, markdown)
 
@@ -399,6 +423,7 @@ async def update_document(doc_id: str, body: dict, background_tasks: BackgroundT
     new_filename = body.get("filename", meta.filename)
     if new_filename and not new_filename.endswith(".md"):
         new_filename += ".md"
+    content_changed = markdown != old_content
         
     if new_filename != meta.filename:
         try:
@@ -417,21 +442,21 @@ async def update_document(doc_id: str, body: dict, background_tasks: BackgroundT
     )
 
     with get_db() as conn:
-        conn.execute(
-            "UPDATE documents SET content=?, title=?, filename=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
-            (markdown, new_title, new_filename, doc_id),
-        )
-
-    # Rebuild tree index in background
-    async def _rebuild_tree(did: str, md: str):
-        tree = await build_tree_index(md)
-        with get_db() as conn:
+        if content_changed:
             conn.execute(
-                "UPDATE documents SET tree_index=? WHERE id=?",
-                (json.dumps(tree, ensure_ascii=False) if tree else None, did),
+                "UPDATE documents SET content=?, title=?, filename=?, tree_index=NULL, updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                (markdown, new_title, new_filename, doc_id),
+            )
+        else:
+            conn.execute(
+                "UPDATE documents SET content=?, title=?, filename=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                (markdown, new_title, new_filename, doc_id),
             )
 
-    background_tasks.add_task(_rebuild_tree, doc_id, markdown)
+    if content_changed:
+        invalidate_document_embeddings(doc_id)
+        # Rebuild tree index in background (shared write path — see document_store).
+        background_tasks.add_task(rebuild_tree_index, doc_id, markdown)
 
     return {"id": doc_id, "updated": True}
 
@@ -444,6 +469,7 @@ async def delete_document(doc_id: str):
     try:
         vault.delete_document(doc_id)
         with get_db() as conn:
+            conn.execute("DELETE FROM document_embeddings WHERE doc_id=?", (doc_id,))
             conn.execute("DELETE FROM documents WHERE id=?", (doc_id,))
         return {"deleted": True}
     except FileNotFoundError:

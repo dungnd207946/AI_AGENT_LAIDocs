@@ -13,30 +13,82 @@ CONFIG_PATH = LAIDOCS_HOME / "config.json"
 
 
 class LLMConfig(BaseModel):
+    # provider: "" resolves to "openai". Supported: "openai" (OpenAI-compatible,
+    # incl. local/Ollama/LM Studio), "gemini" (Google), "anthropic".
+    provider: str = ""
     base_url: str = ""
     api_key: str = ""
     model: str = ""
+    # Embedding model for dense retrieval. "" resolves to a provider default
+    # (Gemini: models/text-embedding-004, OpenAI: text-embedding-3-small).
+    embed_model: str = ""
+
+
+class RerankerConfig(BaseModel):
+    enabled: bool = False
+    base_url: str = "https://api.jina.ai/v1/rerank"
+    api_key: str = ""
+    model: str = "jina-reranker-v2-base-multilingual"
+    top_n: int = 8
+    candidate_k: int = 20
+    timeout_s: float = 20.0
+
+
+class GraphRagConfig(BaseModel):
+    # GraphRAG: fuse an entity-relation graph walk into hybrid retrieval and
+    # expose graph-of-thought reasoning to the agent. Requires an LLM (triple
+    # extraction); degrades to a no-op when disabled or unconfigured.
+    enabled: bool = True
+    hops: int = 2                  # how many edges to walk from the question's entities
+    max_units: int = 8            # cap graph-contributed units fused per query
 
 
 class Settings(BaseSettings):
     """LAIDocs application settings persisted to ~/.laidocs/config.json and loaded from .env."""
 
     llm: LLMConfig = LLMConfig()
+    vlm: LLMConfig = LLMConfig()
+    reranker: RerankerConfig = RerankerConfig()
+    graph_rag: GraphRagConfig = GraphRagConfig()
     port: int = 8008
     telemetry_url: str = "http://localhost:8001/api/v1/track"
     telemetry_enabled: bool = True
 
+    default_llm_provider: str = ""
     default_llm_base_url: str = ""
     default_llm_api_key: str = ""
     default_llm_model: str = ""
+    default_llm_embed_model: str = ""
+
+    default_vlm_base_url: str = ""
+    default_vlm_api_key: str = ""
+    default_vlm_model: str = ""
 
     @property
     def active_llm(self) -> LLMConfig:
         return LLMConfig(
+            provider=self.llm.provider or self.default_llm_provider,
             base_url=self.llm.base_url or self.default_llm_base_url,
             api_key=self.llm.api_key or self.default_llm_api_key,
-            model=self.llm.model or self.default_llm_model
+            model=self.llm.model or self.default_llm_model,
+            embed_model=self.llm.embed_model or self.default_llm_embed_model,
         )
+
+    @property
+    def active_vlm(self) -> LLMConfig:
+        return LLMConfig(
+            base_url=self.vlm.base_url or self.default_vlm_base_url,
+            api_key=self.vlm.api_key or self.default_vlm_api_key,
+            model=self.vlm.model or self.default_vlm_model
+        )
+
+    @property
+    def active_reranker(self) -> RerankerConfig:
+        return self.reranker.model_copy()
+
+    @property
+    def active_graph_rag(self) -> GraphRagConfig:
+        return self.graph_rag.model_copy()
 
     model_config = SettingsConfigDict(
         arbitrary_types_allowed=True,

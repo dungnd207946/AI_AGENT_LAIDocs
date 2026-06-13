@@ -108,6 +108,68 @@ const IconRefresh = () => (
   </svg>
 );
 
+const IconSun = () => (
+  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <circle cx="12" cy="12" r="4"/>
+    <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/>
+  </svg>
+);
+
+const IconMoon = () => (
+  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
+  </svg>
+);
+
+type Theme = "dark" | "light";
+
+function applyTheme(theme: Theme) {
+  const root = document.documentElement;
+  if (theme === "light") root.setAttribute("data-theme", "light");
+  else root.removeAttribute("data-theme");
+}
+
+function ThemeToggle() {
+  const [theme, setTheme] = useState<Theme>(() => {
+    const saved = localStorage.getItem("laidocs-theme");
+    return saved === "light" ? "light" : "dark";
+  });
+  const [hovered, setHovered] = useState(false);
+
+  useEffect(() => {
+    applyTheme(theme);
+    localStorage.setItem("laidocs-theme", theme);
+  }, [theme]);
+
+  const isLight = theme === "light";
+
+  return (
+    <button
+      onClick={() => setTheme(isLight ? "dark" : "light")}
+      title={isLight ? "Switch to dark theme" : "Switch to light theme"}
+      aria-label={isLight ? "Switch to dark theme" : "Switch to light theme"}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      style={{
+        flexShrink: 0,
+        width: 28,
+        height: 28,
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        borderRadius: 7,
+        border: "none",
+        background: hovered ? "var(--surface-alt)" : "transparent",
+        color: hovered ? "var(--text-muted)" : "var(--text-faint)",
+        cursor: "pointer",
+        transition: "all 0.15s ease",
+      }}
+    >
+      {isLight ? <IconMoon /> : <IconSun />}
+    </button>
+  );
+}
+
 function ReloadButton() {
   const [spinning, setSpinning] = useState(false);
 
@@ -376,7 +438,7 @@ export default function Sidebar({ collapsed: _collapsed, onToggleCollapse }: Sid
           </div>
           <div style={{ minWidth: 0 }}>
             <div style={{ fontSize: 14, fontWeight: 600, color: "var(--text-primary)", letterSpacing: "-0.3px", lineHeight: 1 }}>
-              LAIDocs
+              Docs Agent
             </div>
             <div style={{ fontSize: 9, color: "var(--text-faint)", marginTop: 3, letterSpacing: "1.4px", textTransform: "uppercase" }}>
               Knowledge Base
@@ -573,6 +635,7 @@ export default function Sidebar({ collapsed: _collapsed, onToggleCollapse }: Sid
             Settings
           </NavItem>
         </div>
+        <ThemeToggle />
         <ReloadButton />
       </div>
 

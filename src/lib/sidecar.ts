@@ -49,18 +49,38 @@ export async function apiDelete<T>(path: string): Promise<T> {
 
 // ── Streaming chat (SSE) ──────────────────────────────────────────
 
-export async function streamChat(
-  docId: string,
-  question: string,
-  onChunk: (text: string) => void,
-  sessionId?: number,
-): Promise<void> {
-  const res = await fetch(`${API_BASE}/api/chat/stream`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ doc_id: docId, question, session_id: sessionId ?? null }),
-  });
+/** A document unit cited as the source for an assistant answer. */
+export interface Evidence {
+  unit_id: string;
+  title: string;
+  kind: "text" | "image" | "table" | string;
+  heading_path: string[];
+  preview: string;
+}
 
+/** Payload of an edit-confirmation gate: the agent paused before writing. */
+export interface EditConfirmation {
+  type: "edit_confirmation";
+  file: string;
+  action: "REPLACE" | "DELETE" | string;
+  old_string: string;
+  new_string: string;
+}
+
+export interface StreamHandlers {
+  onChunk: (text: string) => void;
+  onEdited?: () => void;
+  /** Citation evidence emitted once the answer is grounded. */
+  onEvidence?: (evidence: Evidence[]) => void;
+  /** Graph-of-thought reasoning chain (multi-hop questions). */
+  onChain?: (chain: string) => void;
+  /** The turn paused at an edit-confirmation gate; resolve via resumeChat. */
+  onInterrupt?: (confirmation: EditConfirmation) => void;
+}
+
+/** Read an SSE response body, dispatching sentinels + tokens to handlers. */
+async function consumeChatStream(res: Response, handlers: StreamHandlers): Promise<void> {
+  const { onChunk, onEdited, onEvidence, onChain, onInterrupt } = handlers;
   if (!res.ok || !res.body) {
     throw new Error(`Chat request failed: ${res.status}`);
   }
@@ -84,6 +104,23 @@ export async function streamChat(
         if (!trimmed.startsWith("data: ")) continue;
         const payload = trimmed.slice(6);
         if (payload === "[DONE]") return;
+        if (payload === "[EDITED]") {
+          // Agent edited the document — let the caller reload it
+          onEdited?.();
+          continue;
+        }
+        if (payload.startsWith("[EVIDENCE] ")) {
+          try { onEvidence?.(JSON.parse(payload.slice(11)) as Evidence[]); } catch { /* ignore */ }
+          continue;
+        }
+        if (payload.startsWith("[CHAIN] ")) {
+          try { onChain?.(JSON.parse(payload.slice(8)) as string); } catch { /* ignore */ }
+          continue;
+        }
+        if (payload.startsWith("[INTERRUPT] ")) {
+          try { onInterrupt?.(JSON.parse(payload.slice(12)) as EditConfirmation); } catch { /* ignore */ }
+          continue;
+        }
         if (payload.startsWith("[ERROR]")) throw new Error(payload.slice(8));
         // Tokens are plain text with escaped newlines
         onChunk(payload.replace(/\\n/g, "\n"));
@@ -94,7 +131,68 @@ export async function streamChat(
   }
 }
 
-// ── Chat history & session management ─────────────────────────────
+export async function streamChat(
+  docIds: string[],
+  question: string,
+  handlers: StreamHandlers,
+  sessionId?: number,
+): Promise<void> {
+  const res = await fetch(`${API_BASE}/api/chat/stream`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ doc_ids: docIds, question, session_id: sessionId ?? null }),
+  });
+  await consumeChatStream(res, handlers);
+}
+
+/** Resume a turn paused at an edit-confirmation gate (apply_edit interrupt). */
+export async function resumeChat(
+  docIds: string[],
+  decision: "approve" | "reject",
+  handlers: StreamHandlers,
+  sessionId?: number,
+): Promise<void> {
+  const res = await fetch(`${API_BASE}/api/chat/resume`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ doc_ids: docIds, decision, session_id: sessionId ?? null }),
+  });
+  await consumeChatStream(res, handlers);
+}
+
+// ── Document list (for the chat scope picker) ─────────────────────
+
+export interface DocSummary {
+  id: string;
+  title?: string;
+  filename: string;
+  folder: string;
+}
+
+export async function listDocuments(): Promise<DocSummary[]> {
+  return apiGet<DocSummary[]>(`/api/documents/`);
+}
+
+// ── RAG vs GraphRAG compare (demo) ────────────────────────────────
+
+export interface CompareArm {
+  answer: string;
+  units: Evidence[];
+}
+
+export interface CompareResult {
+  doc_id: string;
+  question: string;
+  rag: CompareArm;
+  graph: CompareArm;
+  bridge_unit_ids: string[];
+}
+
+export async function compareRetrieval(docId: string, question: string): Promise<CompareResult> {
+  return apiPost<CompareResult>("/api/chat/compare", { doc_id: docId, question });
+}
+
+// ── Chat history & session management (global sessions) ───────────
 
 export interface ChatMessage {
   id: number;
@@ -102,20 +200,26 @@ export interface ChatMessage {
   role: "user" | "assistant";
   content: string;
   created_at: string;
+  evidence?: Evidence[];
+  chain?: string;
 }
 
-export async function getChatHistory(docId: string): Promise<ChatMessage[]> {
-  const res = await apiGet<{ messages: ChatMessage[] }>(`/api/chat/history/${docId}`);
+export async function getChatHistory(): Promise<ChatMessage[]> {
+  const res = await apiGet<{ messages: ChatMessage[] }>(`/api/chat/history`);
   return res.messages;
 }
 
-export async function startNewSession(docId: string): Promise<number> {
-  const res = await apiPost<{ session_id: number }>(`/api/chat/new-session/${docId}`, {});
+export async function startNewSession(): Promise<number> {
+  const res = await apiPost<{ session_id: number }>(`/api/chat/new-session`, {});
   return res.session_id;
 }
 
-export async function clearChatHistory(docId: string): Promise<void> {
-  await apiDelete(`/api/chat/history/${docId}`);
+export async function clearChatHistory(): Promise<void> {
+  await apiDelete(`/api/chat/history`);
+}
+
+export async function deleteSession(sessionId: number): Promise<void> {
+  await apiDelete(`/api/chat/session/${sessionId}`);
 }
 
 // ── Sidecar health check ──────────────────────────────────────────

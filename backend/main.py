@@ -10,6 +10,11 @@ import threading
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+# ── Load .env early — puts ALL vars (including HF_TOKEN) into os.environ
+# before any model library (HuggingFace / docling / torch) is imported.
+from dotenv import load_dotenv, find_dotenv
+load_dotenv(find_dotenv(usecwd=True), override=False)
+
 # ── UTF-8 handling (critical on Windows) ───────────────────────────
 os.environ.setdefault("PYTHONUTF8", "1")
 if hasattr(sys.stdout, "reconfigure"):
@@ -67,7 +72,9 @@ async def lifespan(app: FastAPI):
 
     print("[sidecar] Server ready")
     yield
-    # Shutdown (nothing to clean up yet)
+    # Shutdown — close the durable conversation checkpointer connection
+    from backend.services.agent import close_checkpointer
+    await close_checkpointer()
 
 
 # ── App ────────────────────────────────────────────────────────────
@@ -113,6 +120,7 @@ from backend.api import (
     documents_router,
     folders_router,
     chat_router,
+    download_router,
 )
 
 app.include_router(backup_router)
@@ -120,6 +128,7 @@ app.include_router(settings_router)
 app.include_router(documents_router)
 app.include_router(folders_router)
 app.include_router(chat_router)
+app.include_router(download_router)
 
 
 # ── Health check ───────────────────────────────────────────────────

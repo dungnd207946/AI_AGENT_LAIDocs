@@ -49,9 +49,17 @@ fn spawn_sidecar(app: &tauri::AppHandle) -> Result<(), String> {
 
     let (mut rx, child) = if cfg!(debug_assertions) {
         // Dev: run the Python backend from the venv directly.
-        let venv_python = project_root.join("backend/.venv/bin/python3");
+        // venv layout differs per OS: Windows uses Scripts\python.exe,
+        // Unix uses bin/python3.
+        let venv_python = if cfg!(windows) {
+            project_root.join("backend/.venv/Scripts/python.exe")
+        } else {
+            project_root.join("backend/.venv/bin/python3")
+        };
         let python_bin = if venv_python.exists() {
             venv_python.to_string_lossy().to_string()
+        } else if cfg!(windows) {
+            "python".to_string()
         } else {
             "python3".to_string()
         };

@@ -68,6 +68,62 @@
   --shadow-glow: 0 0 20px var(--accent-glow);
 }
 
+/* ── Light Theme (warm) — toggled via [data-theme="light"] on <html> ── */
+:root[data-theme="light"] {
+  /* ── Backgrounds ─────────────────────────────────────────── */
+  --bg: #faf9f7;
+  --bg-gradient: linear-gradient(165deg, #fefdfb 0%, #f1efea 100%);
+  --surface: #ffffff;
+  --surface-alt: #f3f1ec;
+  --surface-hover: #ebe8e2;
+  --surface-raised: #ffffff;
+  --surface-glass: rgba(255, 255, 255, 0.78);
+
+  /* ── Borders ─────────────────────────────────────────────── */
+  --border: rgba(0, 0, 0, 0.08);
+  --border-strong: rgba(0, 0, 0, 0.16);
+  --border-hover: rgba(0, 0, 0, 0.12);
+  --border-glow: rgba(99, 102, 241, 0.22);
+
+  /* ── Text ────────────────────────────────────────────────── */
+  --text-primary: #1b1a18;
+  --text-secondary: #45423d;
+  --text-muted: #6c6963;
+  --text-faint: #9c9892;
+  --text-link: #4f46e5;
+
+  /* ── Accent (Indigo) ─────────────────────────────────────── */
+  --accent: #6366f1;
+  --accent-muted: rgba(99, 102, 241, 0.13);
+  --accent-subtle: rgba(99, 102, 241, 0.08);
+  --accent-glow: rgba(99, 102, 241, 0.2);
+  --accent-text: #4f46e5;
+
+  /* ── Interactive ─────────────────────────────────────────── */
+  --btn-bg: #f0eee9;
+  --btn-bg-hover: #e5e2db;
+  --btn-text: #45423d;
+  --btn-accent: linear-gradient(135deg, #6366f1, #818cf8);
+
+  /* ── Semantic ────────────────────────────────────────────── */
+  --success: #059669;
+  --success-bg: rgba(5, 150, 105, 0.1);
+  --error: #dc2626;
+  --error-bg: rgba(220, 38, 38, 0.09);
+  --warn: #d97706;
+  --warn-bg: rgba(217, 119, 6, 0.1);
+
+  /* ── Shadows (softer on light) ───────────────────────────── */
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.06);
+  --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.08);
+  --shadow-lg: 0 12px 40px rgba(0, 0, 0, 0.13);
+}
+
+/* Smooth crossfade when switching themes */
+body, .warp-card, .warp-input, [class*="surface"] {
+  transition: background-color var(--transition-base), border-color var(--transition-base), color var(--transition-base);
+}
+
 /* ── Reset ──────────────────────────────────────────────────── */
 *, *::before, *::after { box-sizing: border-box; }
 

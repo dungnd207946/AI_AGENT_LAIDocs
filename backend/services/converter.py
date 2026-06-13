@@ -20,6 +20,9 @@ from docling.datamodel.base_models import ConversionStatus, InputFormat
 from docling.datamodel.pipeline_options import (
     PdfPipelineOptions,
     PictureDescriptionApiOptions,
+    RapidOcrOptions,
+    AcceleratorOptions,
+    AcceleratorDevice,
 )
 from docling.document_converter import (
     DocumentConverter as _DoclingConverter,
@@ -51,20 +54,42 @@ def _extract_title(markdown: str, file_path: str) -> str:
     return Path(file_path).stem
 
 
-def _build_docling_converter(settings) -> _DoclingConverter:
-    """Build a DocumentConverter configured from app settings.
+def _build_pdf_options(settings) -> PdfPipelineOptions:
+    """Build the PDF pipeline options (extracted for testability).
 
-    If an LLM base_url + model are present, enables remote VLM picture
-    description for PDFs (requires enable_remote_services=True per Docling
-    docs). Otherwise the pipeline runs fully offline.
+    OCR stays enabled but its detector input is hard-capped to prevent the
+    native ``std::bad_alloc`` crash. Docling renders OCR regions at 216 DPI and
+    RapidOCR's default ``Det.limit_type: min`` / ``limit_side_len: 736`` never
+    shrinks a large scanned page, so the detector allocates a feature-map tensor
+    proportional to the full page and exhausts the C++ heap — taking down the
+    whole sidecar. Forcing ``limit_type: max`` bounds the longest side instead,
+    so memory is bounded regardless of source resolution. Region-based OCR
+    (``force_full_page_ocr=False``, the default) keeps born-digital PDFs cheap
+    while still OCR-ing scanned image pages.
     """
     llm_configured = bool(settings.active_llm.base_url and settings.active_llm.model)
 
     pdf_options = PdfPipelineOptions(
-        generate_picture_images=True,
-        images_scale=2.0,
+        # Only generate full-res picture images when VLM will actually use them.
+        # images_scale=1.0 (from 2.0) halves linear resolution → 4× less memory
+        # per page image, which prevents std::bad_alloc on complex/large pages.
+        generate_picture_images=llm_configured,
+        images_scale=1.0,
         do_picture_description=llm_configured,
         enable_remote_services=llm_configured,
+        accelerator_options=AcceleratorOptions(
+            num_threads=2,
+            device=AcceleratorDevice.CPU,
+        ),
+        # Bound the RapidOCR detector input. Without this, large scanned pages
+        # crash the native onnxruntime backend with std::bad_alloc.
+        ocr_options=RapidOcrOptions(
+            rapidocr_params={
+                "Det.limit_type": "max",      # cap LONGEST side (default: "min")
+                "Det.limit_side_len": 960,    # px ceiling for the detector input
+                "Global.max_side_len": 1280,  # overall safety cap
+            },
+        ),
     )
 
     if llm_configured:
@@ -82,9 +107,19 @@ def _build_docling_converter(settings) -> _DoclingConverter:
             timeout=60,
         )
 
+    return pdf_options
+
+
+def _build_docling_converter(settings) -> _DoclingConverter:
+    """Build a DocumentConverter configured from app settings.
+
+    If an LLM base_url + model are present, enables remote VLM picture
+    description for PDFs (requires enable_remote_services=True per Docling
+    docs). Otherwise the pipeline runs fully offline.
+    """
     return _DoclingConverter(
         format_options={
-            InputFormat.PDF:  PdfFormatOption(pipeline_options=pdf_options),
+            InputFormat.PDF:  PdfFormatOption(pipeline_options=_build_pdf_options(settings)),
             InputFormat.DOCX: WordFormatOption(),
             InputFormat.PPTX: PowerpointFormatOption(),
             InputFormat.XLSX: ExcelFormatOption(),
@@ -192,10 +227,12 @@ class DoclingConverter:
     ) -> tuple[str, str]:
         """Convert a document using the Docling pipeline."""
         result = self._converter.convert(file_path)
-        if result.status != ConversionStatus.SUCCESS:
+        if result.status not in (ConversionStatus.SUCCESS, ConversionStatus.PARTIAL_SUCCESS):
             raise ValueError(
                 f"Docling conversion failed (status={result.status}) for: {file_path}"
             )
+        if result.status == ConversionStatus.PARTIAL_SUCCESS:
+            print(f"[converter] Warning: partial conversion for {file_path} — some pages may be missing")
         doc = result.document
 
         serializer = MarkdownDocSerializer(

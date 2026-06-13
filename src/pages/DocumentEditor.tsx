@@ -7,6 +7,7 @@ import gfm from "@bytemd/plugin-gfm";
 import "bytemd/dist/index.css";
 import "../styles/bytemd-theme.css";
 import ChatPanel from "../components/ChatPanel";
+import type { Evidence } from "../lib/sidecar";
 import { open } from "@tauri-apps/plugin-shell";
 
 type SaveStatus = "saved" | "saving" | "unsaved" | "error";
@@ -232,7 +233,55 @@ export default function DocumentEditor() {
     debounceRef.current = setTimeout(() => saveContent(newContent), 1000);
   }, [doc?.content, saveContent]);
 
+  // Re-fetch the document after the chat agent edits it, so the editor shows
+  // the new content. Cancels any pending auto-save to avoid clobbering the
+  // server's just-written content.
+  const reloadDocument = useCallback(async () => {
+    if (!id) return;
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+    try {
+      const data = await apiGet<Document>(`/api/documents/${id}`);
+      setDoc(data);
+      setContent(data.content);
+      setSaveStatus("saved");
+    } catch {
+      /* leave current content in place on reload failure */
+    }
+  }, [id]);
+
   useEffect(() => () => { if (debounceRef.current) clearTimeout(debounceRef.current); }, []);
+
+  // Jump-to-source: when a citation chip is clicked, scroll the ByteMD preview
+  // pane to the heading the evidence came from and flash it. Best-effort — if
+  // the preview pane isn't rendered (edit-only view) or no heading matches, it
+  // silently no-ops.
+  const handleJumpToSource = useCallback((ev: Evidence) => {
+    const root = editorContainerRef.current;
+    if (!root) return;
+    const targetRaw =
+      (ev.heading_path && ev.heading_path.length
+        ? ev.heading_path[ev.heading_path.length - 1]
+        : ev.title) || "";
+    const target = targetRaw.trim().toLowerCase();
+    if (!target) return;
+
+    const preview = root.querySelector(".bytemd-preview");
+    const scope: ParentNode = preview ?? root;
+    const headings = Array.from(
+      scope.querySelectorAll("h1, h2, h3, h4, h5, h6"),
+    ) as HTMLElement[];
+
+    const norm = (s: string) => s.replace(/\s+/g, " ").trim().toLowerCase();
+    let match = headings.find((h) => norm(h.textContent || "") === target);
+    if (!match) match = headings.find((h) => norm(h.textContent || "").includes(target));
+    if (!match) return;
+
+    match.scrollIntoView({ behavior: "smooth", block: "center" });
+    const prev = match.style.backgroundColor;
+    match.style.transition = "background-color 0.3s";
+    match.style.backgroundColor = "var(--accent-subtle)";
+    setTimeout(() => { match!.style.backgroundColor = prev; }, 1400);
+  }, []);
 
   const handleEditorClick = useCallback((e: React.MouseEvent) => {
     const target = e.target as HTMLElement;
@@ -486,23 +535,23 @@ export default function DocumentEditor() {
           />
         </div>
 
-        {/* Chat drawer — overlay on the right, resizable */}
+        {/* Chat drawer — docked on the right, pushes the editor, resizable */}
         {showChat && id && (
           <div
             ref={chatContainerRef}
             onAnimationEnd={() => { chatHasAnimated.current = true; }}
             style={{
-              position: "absolute",
-              top: 0,
-              right: 0,
-              bottom: 0,
+              position: "relative",
+              flexShrink: 0,
               width: chatWidth,
+              height: "100%",
               zIndex: 20,
               borderLeft: "1px solid var(--border-strong)",
-              boxShadow: "-8px 0 30px rgba(0, 0, 0, 0.35), -2px 0 8px rgba(0, 0, 0, 0.2)",
+              boxShadow: "-2px 0 8px rgba(0, 0, 0, 0.12)",
               animation: chatHasAnimated.current ? undefined : "slideInRight 0.28s cubic-bezier(0.22, 1, 0.36, 1) both",
               overflow: "hidden",
               display: "flex",
+              background: "var(--surface)",
             }}
           >
             {/* Drag handle */}
@@ -523,7 +572,7 @@ export default function DocumentEditor() {
               onMouseLeave={(e) => { if (!isChatDragging) e.currentTarget.style.background = "transparent"; }}
             />
             <div style={{ flex: 1, overflow: "hidden" }}>
-              <ChatPanel key={id} docId={id} onClose={() => { chatHasAnimated.current = false; setShowChat(false); }} />
+              <ChatPanel key={id} initialDocId={id} onDocumentEdited={reloadDocument} onJumpToSource={handleJumpToSource} onClose={() => { chatHasAnimated.current = false; setShowChat(false); }} />
             </div>
           </div>
         )}
