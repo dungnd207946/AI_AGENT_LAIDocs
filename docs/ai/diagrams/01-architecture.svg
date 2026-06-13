@@ -1,0 +1,109 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 880" font-family="Segoe UI, -apple-system, Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="arr" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L8,3 L0,6 Z" fill="#475569"/>
+    </marker>
+  </defs>
+  <rect width="1120" height="880" fill="#F7F8FA"/>
+  <text x="560" y="42" text-anchor="middle" font-size="28" font-weight="700" fill="#0F172A">LAIDocs — System Architecture</text>
+  <text x="560" y="68" text-anchor="middle" font-size="15" fill="#64748B">Local desktop app · only external call is to your configured LLM endpoint</text>
+
+  <!-- Tauri shell -->
+  <rect x="40" y="90" width="1040" height="760" rx="14" fill="#FFFFFF" stroke="#475569" stroke-width="2"/>
+  <text x="60" y="118" font-size="16" font-weight="700" fill="#334155">Tauri v2  ·  Rust shell</text>
+  <text x="60" y="138" font-size="12.5" fill="#64748B">spawns + supervises the sidecar · native file dialogs · graceful shutdown via stdin (never kill())</text>
+
+  <!-- Frontend -->
+  <rect x="70" y="156" width="980" height="84" rx="10" fill="#DBEAFE" stroke="#2563EB" stroke-width="1.6"/>
+  <text x="90" y="184" font-size="17" font-weight="700" fill="#1D4ED8">React 19 + TypeScript + Tailwind  (WebView · Vite :5173)</text>
+  <text x="90" y="208" font-size="13" fill="#1E3A8A">ChatPanel · DocumentEditor · CitationChips · ReasoningChain · CompareDrawer · Settings</text>
+  <text x="90" y="228" font-size="13" fill="#1E3A8A">Renders streamed tokens + citation chips + reasoning paths · approve/reject edit cards</text>
+
+  <!-- Arrow FE->BE -->
+  <line x1="560" y1="240" x2="560" y2="284" stroke="#475569" stroke-width="2" marker-end="url(#arr)"/>
+  <rect x="600" y="246" width="320" height="30" rx="6" fill="#FEF3C7" stroke="#D97706" stroke-width="1.2"/>
+  <text x="760" y="266" text-anchor="middle" font-size="12.5" font-weight="600" fill="#92400E">HTTP REST + SSE streaming · localhost:8008</text>
+
+  <!-- Backend container -->
+  <rect x="70" y="290" width="980" height="540" rx="10" fill="#FAF5FF" stroke="#7C3AED" stroke-width="1.8"/>
+  <text x="90" y="318" font-size="17" font-weight="700" fill="#6D28D9">Python FastAPI sidecar  ·  localhost:8008</text>
+
+  <!-- API routers -->
+  <rect x="92" y="332" width="936" height="52" rx="8" fill="#EDE9FE" stroke="#7C3AED" stroke-width="1.2"/>
+  <text x="106" y="354" font-size="13.5" font-weight="700" fill="#5B21B6">API routers</text>
+  <text x="106" y="374" font-size="12.5" fill="#5B21B6">documents · folders · chat (stream / resume / compare) · settings · backup · downloads</text>
+
+  <line x1="560" y1="384" x2="560" y2="404" stroke="#475569" stroke-width="2" marker-end="url(#arr)"/>
+
+  <!-- Services row -->
+  <text x="106" y="424" font-size="13.5" font-weight="700" fill="#334155">Services</text>
+  <!-- 5 boxes -->
+  <g font-size="12">
+    <!-- Conversion -->
+    <rect x="98" y="434" width="172" height="150" rx="9" fill="#FFEDD5" stroke="#EA580C" stroke-width="1.4"/>
+    <text x="184" y="456" text-anchor="middle" font-size="14" font-weight="700" fill="#9A3412">Conversion</text>
+    <text x="184" y="480" text-anchor="middle" fill="#7C2D12">Docling (PDF/DOCX/</text>
+    <text x="184" y="497" text-anchor="middle" fill="#7C2D12">PPTX/HTML)</text>
+    <text x="184" y="520" text-anchor="middle" fill="#7C2D12">MarkItDown (XLSX)</text>
+    <text x="184" y="543" text-anchor="middle" fill="#7C2D12">Crawl4AI (web)</text>
+    <text x="184" y="566" text-anchor="middle" fill="#7C2D12">→ clean Markdown</text>
+
+    <!-- Indexing -->
+    <rect x="282" y="434" width="172" height="150" rx="9" fill="#CFFAFE" stroke="#0891B2" stroke-width="1.4"/>
+    <text x="368" y="456" text-anchor="middle" font-size="14" font-weight="700" fill="#155E75">Indexing</text>
+    <text x="368" y="480" text-anchor="middle" fill="#155E75">PageIndex tree</text>
+    <text x="368" y="497" text-anchor="middle" fill="#155E75">(headings + summaries)</text>
+    <text x="368" y="520" text-anchor="middle" fill="#155E75">Knowledge-graph</text>
+    <text x="368" y="537" text-anchor="middle" fill="#155E75">triple cache</text>
+    <text x="368" y="566" text-anchor="middle" fill="#155E75">built in background</text>
+
+    <!-- Agent -->
+    <rect x="466" y="434" width="172" height="150" rx="9" fill="#FEE2E2" stroke="#DC2626" stroke-width="1.4"/>
+    <text x="552" y="456" text-anchor="middle" font-size="14" font-weight="700" fill="#991B1B">Agent (LangGraph)</text>
+    <text x="552" y="480" text-anchor="middle" fill="#991B1B">create_react_agent</text>
+    <text x="552" y="497" text-anchor="middle" fill="#991B1B">SOUL prompt</text>
+    <text x="552" y="520" text-anchor="middle" fill="#991B1B">6 tools: retrieve,</text>
+    <text x="552" y="537" text-anchor="middle" fill="#991B1B">graph, image, edit×2,</text>
+    <text x="552" y="554" text-anchor="middle" fill="#991B1B">export</text>
+    <text x="552" y="575" text-anchor="middle" fill="#991B1B">interrupt() edit gate</text>
+
+    <!-- Retrieval -->
+    <rect x="650" y="434" width="172" height="150" rx="9" fill="#D1FAE5" stroke="#059669" stroke-width="1.4"/>
+    <text x="736" y="456" text-anchor="middle" font-size="14" font-weight="700" fill="#065F46">Retrieval</text>
+    <text x="736" y="480" text-anchor="middle" fill="#065F46">tree + BM25 +</text>
+    <text x="736" y="497" text-anchor="middle" fill="#065F46">dense + graph</text>
+    <text x="736" y="520" text-anchor="middle" fill="#065F46">→ RRF fusion</text>
+    <text x="736" y="537" text-anchor="middle" fill="#065F46">→ optional rerank</text>
+    <text x="736" y="560" text-anchor="middle" fill="#065F46">agentic self-critique</text>
+    <text x="736" y="577" text-anchor="middle" fill="#065F46">loop</text>
+
+    <!-- Memory -->
+    <rect x="834" y="434" width="172" height="150" rx="9" fill="#FCE7F3" stroke="#DB2777" stroke-width="1.4"/>
+    <text x="920" y="456" text-anchor="middle" font-size="14" font-weight="700" fill="#9D174D">Memory</text>
+    <text x="920" y="480" text-anchor="middle" fill="#9D174D">SqliteSaver</text>
+    <text x="920" y="497" text-anchor="middle" fill="#9D174D">checkpointer</text>
+    <text x="920" y="520" text-anchor="middle" fill="#9D174D">trim hook (10 turns)</text>
+    <text x="920" y="537" text-anchor="middle" fill="#9D174D">compactor (summary)</text>
+    <text x="920" y="560" text-anchor="middle" fill="#9D174D">preferences.md</text>
+  </g>
+
+  <!-- LLM factory bar -->
+  <rect x="98" y="596" width="908" height="44" rx="8" fill="#FFF7ED" stroke="#EA580C" stroke-width="1.3"/>
+  <text x="552" y="623" text-anchor="middle" font-size="13" font-weight="700" fill="#9A3412">Provider-agnostic LLM factory (llm.py)  →  Gemini · OpenAI-compatible / Ollama · Anthropic   |   every LLM &amp; embedding call goes through here</text>
+
+  <line x1="560" y1="640" x2="560" y2="660" stroke="#475569" stroke-width="2" marker-end="url(#arr)"/>
+
+  <!-- Storage -->
+  <text x="106" y="680" font-size="13.5" font-weight="700" fill="#334155">Storage</text>
+  <rect x="98" y="690" width="446" height="120" rx="9" fill="#E2E8F0" stroke="#475569" stroke-width="1.4"/>
+  <text x="321" y="714" text-anchor="middle" font-size="14" font-weight="700" fill="#1E293B">SQLite</text>
+  <text x="321" y="738" text-anchor="middle" font-size="12.5" fill="#334155">laidocs.db — metadata · tree index · chat history</text>
+  <text x="321" y="757" text-anchor="middle" font-size="12.5" fill="#334155">embedding cache · knowledge-graph triple cache</text>
+  <text x="321" y="784" text-anchor="middle" font-size="12.5" fill="#334155">checkpoints.db — durable conversation memory</text>
+
+  <rect x="560" y="690" width="446" height="120" rx="9" fill="#E2E8F0" stroke="#475569" stroke-width="1.4"/>
+  <text x="783" y="714" text-anchor="middle" font-size="14" font-weight="700" fill="#1E293B">Filesystem vault  (~/.laidocs/vault/)</text>
+  <text x="783" y="740" text-anchor="middle" font-size="12.5" fill="#334155">&lt;folder&gt;/&lt;doc&gt;.md  +  .meta.json sidecars</text>
+  <text x="783" y="762" text-anchor="middle" font-size="12.5" fill="#334155">assets/&lt;doc_id&gt;_N.png  (extracted figures)</text>
+  <text x="783" y="788" text-anchor="middle" font-size="12.5" fill="#334155">memories/preferences.md</text>
+</svg>

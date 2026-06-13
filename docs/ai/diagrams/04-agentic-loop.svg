@@ -1,0 +1,72 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 720" font-family="Segoe UI, -apple-system, Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="arr" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L8,3 L0,6 Z" fill="#475569"/>
+    </marker>
+    <marker id="arrR" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L8,3 L0,6 Z" fill="#9333EA"/>
+    </marker>
+  </defs>
+  <rect width="1100" height="720" fill="#F7F8FA"/>
+  <text x="550" y="42" text-anchor="middle" font-size="28" font-weight="700" fill="#0F172A">Agentic Retrieval — Self-Critique Multi-Hop Loop</text>
+  <text x="550" y="68" text-anchor="middle" font-size="15" fill="#64748B">solves split-evidence questions: "X did Y, who also did Z" · max 3 rounds</text>
+
+  <!-- start -->
+  <rect x="420" y="96" width="260" height="50" rx="10" fill="#DBEAFE" stroke="#2563EB" stroke-width="1.6"/>
+  <text x="550" y="126" text-anchor="middle" font-size="14" font-weight="700" fill="#1D4ED8">Question  →  queries = [question]</text>
+  <line x1="550" y1="146" x2="550" y2="170" stroke="#475569" stroke-width="2" marker-end="url(#arr)"/>
+
+  <!-- hybrid rank -->
+  <rect x="380" y="172" width="340" height="58" rx="10" fill="#D1FAE5" stroke="#059669" stroke-width="1.6"/>
+  <text x="550" y="195" text-anchor="middle" font-size="14" font-weight="700" fill="#065F46">Hybrid rank each query (tree+BM25+dense+graph → RRF)</text>
+  <text x="550" y="216" text-anchor="middle" font-size="12" fill="#065F46">accumulate units by best RRF rank seen</text>
+  <line x1="550" y1="230" x2="550" y2="254" stroke="#475569" stroke-width="2" marker-end="url(#arr)"/>
+
+  <!-- build context -->
+  <rect x="410" y="256" width="280" height="46" rx="10" fill="#FEE2E2" stroke="#DC2626" stroke-width="1.4"/>
+  <text x="550" y="284" text-anchor="middle" font-size="13.5" font-weight="700" fill="#991B1B">Build best-effort context so far</text>
+  <line x1="550" y1="302" x2="550" y2="326" stroke="#475569" stroke-width="2" marker-end="url(#arr)"/>
+
+  <!-- critic -->
+  <rect x="400" y="328" width="300" height="78" rx="12" fill="#F3E8FF" stroke="#9333EA" stroke-width="1.8"/>
+  <text x="550" y="352" text-anchor="middle" font-size="15" font-weight="700" fill="#6B21A8">Critic LLM (_critique)</text>
+  <text x="550" y="374" text-anchor="middle" font-size="12.5" fill="#6B21A8">"Is this context SUFFICIENT to answer?"</text>
+  <text x="550" y="393" text-anchor="middle" font-size="12.5" fill="#6B21A8">if not → 1–2 SPECIFIC follow-up sub-queries</text>
+
+  <!-- decision: sufficient -->
+  <line x1="700" y1="367" x2="860" y2="367" stroke="#475569" stroke-width="2" marker-end="url(#arr)"/>
+  <text x="780" y="358" text-anchor="middle" font-size="12" font-weight="700" fill="#16A34A">sufficient / no</text>
+  <text x="780" y="372" text-anchor="middle" font-size="12" font-weight="700" fill="#16A34A">follow-ups / 3 rounds</text>
+  <rect x="862" y="338" width="200" height="58" rx="10" fill="#DCFCE7" stroke="#16A34A" stroke-width="1.6"/>
+  <text x="962" y="362" text-anchor="middle" font-size="14" font-weight="700" fill="#166534">DONE</text>
+  <text x="962" y="382" text-anchor="middle" font-size="12" fill="#166534">return top units (≤12)</text>
+
+  <!-- loop back: insufficient -->
+  <path d="M400 390 C 230 410, 230 200, 380 201" fill="none" stroke="#9333EA" stroke-width="2.2" stroke-dasharray="7 4" marker-end="url(#arrR)"/>
+  <text x="208" y="300" text-anchor="middle" font-size="12.5" font-weight="700" fill="#6B21A8">insufficient →</text>
+  <text x="208" y="318" text-anchor="middle" font-size="12.5" font-weight="700" fill="#6B21A8">queries = follow-ups</text>
+  <text x="208" y="336" text-anchor="middle" font-size="11.5" fill="#6B21A8">(next round)</text>
+
+  <!-- example -->
+  <rect x="120" y="452" width="860" height="110" rx="12" fill="#FFFFFF" stroke="#475569" stroke-width="1.4"/>
+  <text x="140" y="476" font-size="14" font-weight="700" fill="#334155">Example trace</text>
+  <text x="140" y="500" font-size="12.5" fill="#475569">Round 1 — query: "Who founded Acme and where were they born?" → retrieves "Acme founded by Jane" only.</text>
+  <text x="140" y="521" font-size="12.5" fill="#475569">Critic: insufficient, missing birthplace → follow-up: "Where was Jane born?"</text>
+  <text x="140" y="542" font-size="12.5" fill="#475569">Round 2 — retrieves "Jane was born in Paris" → critic: sufficient → answer cites both sections.</text>
+
+  <!-- safety -->
+  <rect x="120" y="582" width="420" height="110" rx="12" fill="#FEF2F2" stroke="#DC2626" stroke-width="1.3"/>
+  <text x="330" y="606" text-anchor="middle" font-size="13.5" font-weight="700" fill="#991B1B">Safety: it can never hang</text>
+  <text x="138" y="630" font-size="12" fill="#7F1D1D">· flaky critique call → defaults sufficient=true</text>
+  <text x="138" y="650" font-size="12" fill="#7F1D1D">· no new units this round → stop (converged)</text>
+  <text x="138" y="670" font-size="12" fill="#7F1D1D">· hard cap MAX_RETRIEVAL_ROUNDS = 3</text>
+  <text x="138" y="688" font-size="12" fill="#7F1D1D">→ worst case degrades to single-shot, not a loop</text>
+
+  <!-- when it helps -->
+  <rect x="560" y="582" width="420" height="110" rx="12" fill="#EFF6FF" stroke="#2563EB" stroke-width="1.3"/>
+  <text x="770" y="606" text-anchor="middle" font-size="13.5" font-weight="700" fill="#1D4ED8">When it helps vs costs</text>
+  <text x="578" y="630" font-size="12" fill="#1E3A8A">✓ helps: compare A&amp;B, split-evidence, multi-hop</text>
+  <text x="578" y="650" font-size="12" fill="#1E3A8A">~ neutral: simple lookups (stops after round 1)</text>
+  <text x="578" y="670" font-size="12" fill="#1E3A8A">✗ cost: up to ~3× the LLM calls of single-shot</text>
+  <text x="578" y="688" font-size="12" fill="#1E3A8A">bounds: ≤2 follow-ups/round, ≤12 accumulated units</text>
+</svg>

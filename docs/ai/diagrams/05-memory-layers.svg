@@ -1,0 +1,62 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1140 760" font-family="Segoe UI, -apple-system, Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="arr" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L8,3 L0,6 Z" fill="#475569"/>
+    </marker>
+  </defs>
+  <rect width="1140" height="760" fill="#F7F8FA"/>
+  <text x="570" y="42" text-anchor="middle" font-size="28" font-weight="700" fill="#0F172A">Memory — Three Independent Layers</text>
+  <text x="570" y="68" text-anchor="middle" font-size="15" fill="#64748B">don't conflate them: durable storage · model's view · long-term bound</text>
+
+  <!-- Layer 1 -->
+  <rect x="60" y="96" width="1020" height="150" rx="12" fill="#FCE7F3" stroke="#DB2777" stroke-width="1.8"/>
+  <text x="84" y="124" font-size="17" font-weight="700" fill="#9D174D">1 · Durable conversation memory  —  the checkpointer</text>
+  <text x="84" y="150" font-size="13" fill="#9D174D">LangGraph AsyncSqliteSaver → ~/.laidocs/data/checkpoints.db   ·   thread_id = "session-{session_id}"</text>
+  <text x="84" y="174" font-size="13" fill="#9D174D">Persists the FULL message history. Survives backend restarts.</text>
+  <text x="84" y="198" font-size="13" fill="#9D174D">Each turn we send ONLY the new question — the checkpointer replays the rest (no double-feeding).</text>
+  <text x="84" y="226" font-size="12.5" font-style="italic" fill="#BE185D">Problem it creates: stored list grows unboundedly (huge retrieval ToolMessages) → layers 2 &amp; 3 fix this.</text>
+
+  <!-- Layer 2 -->
+  <rect x="60" y="262" width="500" height="200" rx="12" fill="#EDE9FE" stroke="#7C3AED" stroke-width="1.8"/>
+  <text x="84" y="290" font-size="17" font-weight="700" fill="#5B21B6">2 · Model's view  —  pre_model_hook</text>
+  <text x="84" y="316" font-size="13" fill="#5B21B6">_trim_to_recent_turns()</text>
+  <text x="84" y="340" font-size="13" fill="#5B21B6">Caps what the LLM SEES this step to the</text>
+  <text x="84" y="358" font-size="13" fill="#5B21B6">last MAX_RECENT_TURNS = 10 user turns.</text>
+  <text x="84" y="386" font-size="13" fill="#5B21B6">Returns llm_input_messages (a VIEW) —</text>
+  <text x="84" y="404" font-size="13" fill="#5B21B6">the stored checkpoint is untouched.</text>
+  <text x="84" y="432" font-size="12.5" font-style="italic" fill="#6D28D9">Window starts on a HumanMessage so a</text>
+  <text x="84" y="450" font-size="12.5" font-style="italic" fill="#6D28D9">tool-call/result pair is never orphaned.</text>
+
+  <!-- Layer 3 -->
+  <rect x="580" y="262" width="500" height="200" rx="12" fill="#DBEAFE" stroke="#2563EB" stroke-width="1.8"/>
+  <text x="604" y="290" font-size="17" font-weight="700" fill="#1D4ED8">3 · Long-term bound  —  the compactor</text>
+  <text x="604" y="316" font-size="13" fill="#1E3A8A">compact_checkpointer_if_needed()  (runs in</text>
+  <text x="604" y="334" font-size="13" fill="#1E3A8A">the finally block AFTER each turn)</text>
+  <text x="604" y="362" font-size="13" fill="#1E3A8A">If stored history &gt; 4000 tokens → replace all</text>
+  <text x="604" y="380" font-size="13" fill="#1E3A8A">but the last 2 exchanges with ONE</text>
+  <text x="604" y="398" font-size="13" fill="#1E3A8A">LLM-generated summary AIMessage.</text>
+  <text x="604" y="426" font-size="12.5" font-style="italic" fill="#1D4ED8">Writes a UUID6 checkpoint id (time-ordered)</text>
+  <text x="604" y="444" font-size="12.5" font-style="italic" fill="#1D4ED8">so it's picked as "latest", not a uuid4.</text>
+
+  <!-- bracket: three sources -->
+  <text x="570" y="498" text-anchor="middle" font-size="14" font-weight="700" fill="#334155">Three different bounds on three different token sources</text>
+  <rect x="120" y="512" width="280" height="56" rx="9" fill="#ECFDF5" stroke="#059669" stroke-width="1.3"/>
+  <text x="260" y="535" text-anchor="middle" font-size="12.5" font-weight="700" fill="#065F46">retrieved context</text>
+  <text x="260" y="555" text-anchor="middle" font-size="12" fill="#065F46">capped 12 000 chars</text>
+  <rect x="430" y="512" width="280" height="56" rx="9" fill="#EDE9FE" stroke="#7C3AED" stroke-width="1.3"/>
+  <text x="570" y="535" text-anchor="middle" font-size="12.5" font-weight="700" fill="#5B21B6">recent dialogue</text>
+  <text x="570" y="555" text-anchor="middle" font-size="12" fill="#5B21B6">capped 10 turns</text>
+  <rect x="740" y="512" width="280" height="56" rx="9" fill="#DBEAFE" stroke="#2563EB" stroke-width="1.3"/>
+  <text x="880" y="535" text-anchor="middle" font-size="12.5" font-weight="700" fill="#1D4ED8">long-term history</text>
+  <text x="880" y="555" text-anchor="middle" font-size="12" fill="#1D4ED8">summarized &gt; 4000 tok</text>
+
+  <!-- preferences -->
+  <rect x="60" y="592" width="1020" height="68" rx="12" fill="#FEF3C7" stroke="#D97706" stroke-width="1.6"/>
+  <text x="84" y="618" font-size="15" font-weight="700" fill="#92400E">+ Preference memory  (read-only seeding)</text>
+  <text x="84" y="642" font-size="12.5" fill="#92400E">~/.laidocs/memories/preferences.md read at agent BUILD time → injected into the system prompt. No live write-back store.</text>
+
+  <!-- key distinction -->
+  <rect x="60" y="676" width="1020" height="60" rx="12" fill="#F1F5F9" stroke="#64748B" stroke-width="1.3"/>
+  <text x="570" y="700" text-anchor="middle" font-size="13.5" font-weight="700" fill="#334155">Key correctness property</text>
+  <text x="570" y="722" text-anchor="middle" font-size="12.5" fill="#475569">Display history (chat_messages table) is SEPARATE from the checkpointer — it survives session reset and is never touched by compaction.</text>
+</svg>

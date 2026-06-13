@@ -1,0 +1,118 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 860" font-family="Segoe UI, -apple-system, Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="arr" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L8,3 L0,6 Z" fill="#475569"/>
+    </marker>
+  </defs>
+  <rect width="1200" height="860" fill="#F7F8FA"/>
+  <text x="600" y="42" text-anchor="middle" font-size="28" font-weight="700" fill="#0F172A">Hybrid Retrieval — Four Signals, One RRF Fusion</text>
+  <text x="600" y="68" text-anchor="middle" font-size="15" fill="#64748B">every retriever ranks the SAME unit corpus, so their lists fuse cleanly</text>
+
+  <!-- Query -->
+  <rect x="480" y="92" width="240" height="48" rx="10" fill="#DBEAFE" stroke="#2563EB" stroke-width="1.6"/>
+  <text x="600" y="122" text-anchor="middle" font-size="15" font-weight="700" fill="#1D4ED8">User question</text>
+
+  <!-- Unit corpus -->
+  <line x1="600" y1="140" x2="600" y2="162" stroke="#475569" stroke-width="2" marker-end="url(#arr)"/>
+  <rect x="300" y="164" width="600" height="74" rx="10" fill="#E2E8F0" stroke="#475569" stroke-width="1.6"/>
+  <text x="600" y="187" text-anchor="middle" font-size="14" font-weight="700" fill="#1E293B">Shared unit corpus</text>
+  <text x="600" y="208" text-anchor="middle" font-size="12.5" fill="#334155">tree node (section)  ·  OR paragraph chunk c0001…  (no-heading docs)</text>
+  <text x="600" y="226" text-anchor="middle" font-size="12.5" fill="#334155">+ figure units img0001 (alt + VLM desc + caption)  + table units tbl0001 (cells intact)</text>
+
+  <!-- four retrievers -->
+  <line x1="600" y1="238" x2="600" y2="258" stroke="#475569" stroke-width="2"/>
+  <line x1="160" y1="258" x2="1040" y2="258" stroke="#475569" stroke-width="2"/>
+  <line x1="160" y1="258" x2="160" y2="280" stroke="#475569" stroke-width="2" marker-end="url(#arr)"/>
+  <line x1="453" y1="258" x2="453" y2="280" stroke="#475569" stroke-width="2" marker-end="url(#arr)"/>
+  <line x1="747" y1="258" x2="747" y2="280" stroke="#475569" stroke-width="2" marker-end="url(#arr)"/>
+  <line x1="1040" y1="258" x2="1040" y2="280" stroke="#475569" stroke-width="2" marker-end="url(#arr)"/>
+
+  <!-- Tree -->
+  <rect x="64" y="282" width="192" height="150" rx="10" fill="#D1FAE5" stroke="#059669" stroke-width="1.6"/>
+  <text x="160" y="306" text-anchor="middle" font-size="15" font-weight="700" fill="#065F46">TREE</text>
+  <text x="160" y="328" text-anchor="middle" font-size="11.5" fill="#065F46">select_node_ids()</text>
+  <text x="160" y="350" text-anchor="middle" font-size="11.5" fill="#065F46">LLM reads headings +</text>
+  <text x="160" y="366" text-anchor="middle" font-size="11.5" fill="#065F46">summaries (no body)</text>
+  <text x="160" y="388" text-anchor="middle" font-size="11.5" fill="#065F46">→ picks node ids</text>
+  <text x="160" y="416" text-anchor="middle" font-size="11" font-style="italic" fill="#047857">structure · reasoning</text>
+
+  <!-- BM25 -->
+  <rect x="357" y="282" width="192" height="150" rx="10" fill="#D1FAE5" stroke="#059669" stroke-width="1.6"/>
+  <text x="453" y="306" text-anchor="middle" font-size="15" font-weight="700" fill="#065F46">BM25</text>
+  <text x="453" y="328" text-anchor="middle" font-size="11.5" fill="#065F46">bm25_search()</text>
+  <text x="453" y="350" text-anchor="middle" font-size="11.5" fill="#065F46">rank_bm25 Okapi</text>
+  <text x="453" y="366" text-anchor="middle" font-size="11.5" fill="#065F46">lexical term overlap</text>
+  <text x="453" y="388" text-anchor="middle" font-size="11.5" fill="#065F46">local · no LLM</text>
+  <text x="453" y="416" text-anchor="middle" font-size="11" font-style="italic" fill="#047857">sparse · exact terms</text>
+
+  <!-- Dense -->
+  <rect x="651" y="282" width="192" height="150" rx="10" fill="#D1FAE5" stroke="#059669" stroke-width="1.6"/>
+  <text x="747" y="306" text-anchor="middle" font-size="15" font-weight="700" fill="#065F46">DENSE</text>
+  <text x="747" y="328" text-anchor="middle" font-size="11.5" fill="#065F46">dense_search()</text>
+  <text x="747" y="350" text-anchor="middle" font-size="11.5" fill="#065F46">embedding cosine</text>
+  <text x="747" y="366" text-anchor="middle" font-size="11.5" fill="#065F46">cache keyed by</text>
+  <text x="747" y="382" text-anchor="middle" font-size="11.5" fill="#065F46">per-unit content hash</text>
+  <text x="747" y="416" text-anchor="middle" font-size="11" font-style="italic" fill="#047857">dense · paraphrase</text>
+
+  <!-- Graph -->
+  <rect x="945" y="282" width="192" height="150" rx="10" fill="#CFFAFE" stroke="#0891B2" stroke-width="1.6"/>
+  <text x="1041" y="306" text-anchor="middle" font-size="15" font-weight="700" fill="#155E75">GRAPH</text>
+  <text x="1041" y="328" text-anchor="middle" font-size="11.5" fill="#155E75">graph_search()</text>
+  <text x="1041" y="350" text-anchor="middle" font-size="11.5" fill="#155E75">entity walk, 2 hops</text>
+  <text x="1041" y="366" text-anchor="middle" font-size="11.5" fill="#155E75">triple cache (per unit)</text>
+  <text x="1041" y="388" text-anchor="middle" font-size="11.5" fill="#155E75">→ source units</text>
+  <text x="1041" y="416" text-anchor="middle" font-size="11" font-style="italic" fill="#0E7490">multi-hop · relations</text>
+
+  <!-- ranked lists labels -->
+  <g font-size="11" fill="#475569">
+    <text x="160" y="452" text-anchor="middle">ranked id list</text>
+    <text x="453" y="452" text-anchor="middle">ranked id list</text>
+    <text x="747" y="452" text-anchor="middle">ranked id list</text>
+    <text x="1041" y="452" text-anchor="middle">ranked id list</text>
+  </g>
+  <line x1="160" y1="456" x2="430" y2="492" stroke="#475569" stroke-width="1.8" marker-end="url(#arr)"/>
+  <line x1="453" y1="456" x2="540" y2="492" stroke="#475569" stroke-width="1.8" marker-end="url(#arr)"/>
+  <line x1="747" y1="456" x2="660" y2="492" stroke="#475569" stroke-width="1.8" marker-end="url(#arr)"/>
+  <line x1="1041" y1="456" x2="770" y2="492" stroke="#0891B2" stroke-width="1.8" marker-end="url(#arr)"/>
+
+  <!-- RRF box -->
+  <rect x="350" y="494" width="500" height="96" rx="12" fill="#FEF3C7" stroke="#D97706" stroke-width="2"/>
+  <text x="600" y="522" text-anchor="middle" font-size="17" font-weight="700" fill="#92400E">Reciprocal Rank Fusion (RRF)</text>
+  <text x="600" y="552" text-anchor="middle" font-size="17" font-weight="700" fill="#B45309">score(unit) = Σ  1 / (k + rank),   k = 60</text>
+  <text x="600" y="576" text-anchor="middle" font-size="12" fill="#92400E">units several retrievers agree on rise to the top · keep top 8</text>
+
+  <line x1="600" y1="590" x2="600" y2="614" stroke="#475569" stroke-width="2" marker-end="url(#arr)"/>
+
+  <!-- rerank optional -->
+  <rect x="380" y="616" width="440" height="54" rx="10" fill="#FFEDD5" stroke="#EA580C" stroke-width="1.4"/>
+  <text x="600" y="638" text-anchor="middle" font-size="13.5" font-weight="700" fill="#9A3412">Optional cross-encoder rerank</text>
+  <text x="600" y="658" text-anchor="middle" font-size="11.5" fill="#9A3412">scores (query, doc) jointly — accurate but expensive → only the fused shortlist</text>
+
+  <line x1="600" y1="670" x2="600" y2="694" stroke="#475569" stroke-width="2" marker-end="url(#arr)"/>
+
+  <!-- context -->
+  <rect x="380" y="696" width="440" height="52" rx="10" fill="#FEE2E2" stroke="#DC2626" stroke-width="1.5"/>
+  <text x="600" y="718" text-anchor="middle" font-size="14" font-weight="700" fill="#991B1B">Assemble context (≤ 12 000 chars)</text>
+  <text x="600" y="737" text-anchor="middle" font-size="11.5" fill="#991B1B">each unit labelled [File | Section / Figure / Table] → fed to the LLM</text>
+
+  <!-- why box -->
+  <rect x="64" y="612" width="266" height="136" rx="10" fill="#EFF6FF" stroke="#2563EB" stroke-width="1.3"/>
+  <text x="197" y="634" text-anchor="middle" font-size="13" font-weight="700" fill="#1D4ED8">Why RRF, not weighted avg?</text>
+  <text x="80" y="656" font-size="11.5" fill="#1E3A8A">BM25 score, cosine ∈ [-1,1], and</text>
+  <text x="80" y="673" font-size="11.5" fill="#1E3A8A">an LLM pick are NOT comparable.</text>
+  <text x="80" y="694" font-size="11.5" fill="#1E3A8A">RRF uses only RANK → no</text>
+  <text x="80" y="711" font-size="11.5" fill="#1E3A8A">normalization, no tuned weights,</text>
+  <text x="80" y="728" font-size="11.5" fill="#1E3A8A">rewards cross-retriever agreement.</text>
+
+  <!-- degradation note -->
+  <rect x="870" y="612" width="266" height="136" rx="10" fill="#F1F5F9" stroke="#64748B" stroke-width="1.3"/>
+  <text x="1003" y="634" text-anchor="middle" font-size="13" font-weight="700" fill="#334155">Graceful degradation</text>
+  <text x="886" y="656" font-size="11.5" fill="#475569">any retriever that's unavailable</text>
+  <text x="886" y="673" font-size="11.5" fill="#475569">or errors is simply dropped.</text>
+  <text x="886" y="694" font-size="11.5" fill="#475569">No LLM → BM25 + truncated</text>
+  <text x="886" y="711" font-size="11.5" fill="#475569">content. Anthropic → no</text>
+  <text x="886" y="728" font-size="11.5" fill="#475569">embeddings → BM25 + tree only.</text>
+
+  <text x="600" y="790" text-anchor="middle" font-size="12.5" fill="#64748B">Constants: _PER_RETRIEVER_TOP_K = 10 · _FUSED_TOP_K = 8 · _RRF_K = 60 · MAX_CONTEXT_CHARS = 12 000 · chunk ≈ 1000 chars</text>
+  <text x="600" y="812" text-anchor="middle" font-size="12.5" fill="#64748B">If the tree is the ONLY signal and returns "nothing relevant" → treat as out-of-scope and refuse (anti-hallucination contract)</text>
+</svg>

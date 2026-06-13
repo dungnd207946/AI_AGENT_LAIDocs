@@ -1,0 +1,103 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1180 900" font-family="Segoe UI, -apple-system, Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="arr" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L8,3 L0,6 Z" fill="#475569"/>
+    </marker>
+    <marker id="arrG" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L8,3 L0,6 Z" fill="#059669"/>
+    </marker>
+  </defs>
+  <rect width="1180" height="900" fill="#F7F8FA"/>
+  <text x="590" y="42" text-anchor="middle" font-size="28" font-weight="700" fill="#0F172A">Chat Request Lifecycle</text>
+  <text x="590" y="68" text-anchor="middle" font-size="15" fill="#64748B">what happens after a user sends one message — POST /api/chat/stream (SSE)</text>
+
+  <!-- step helper boxes vertical -->
+  <!-- 1 -->
+  <rect x="430" y="92" width="320" height="56" rx="10" fill="#DBEAFE" stroke="#2563EB" stroke-width="1.5"/>
+  <text x="590" y="115" text-anchor="middle" font-size="14" font-weight="700" fill="#1D4ED8">1 · User selects doc(s) + asks a question</text>
+  <text x="590" y="135" text-anchor="middle" font-size="12" fill="#1E3A8A">ChatPanel → streamChat()</text>
+  <line x1="590" y1="148" x2="590" y2="168" stroke="#475569" stroke-width="2" marker-end="url(#arr)"/>
+
+  <!-- 2 -->
+  <rect x="400" y="170" width="380" height="64" rx="10" fill="#EDE9FE" stroke="#7C3AED" stroke-width="1.5"/>
+  <text x="590" y="192" text-anchor="middle" font-size="14" font-weight="700" fill="#5B21B6">2 · Guards + setup (chat.py)</text>
+  <text x="590" y="212" text-anchor="middle" font-size="12" fill="#5B21B6">LLM configured? docs selected? resolve session_id + titles</text>
+  <text x="590" y="228" text-anchor="middle" font-size="12" fill="#5B21B6">set_tool_context(...) → ContextVar  ·  drain any stale edit-interrupt</text>
+  <line x1="590" y1="234" x2="590" y2="254" stroke="#475569" stroke-width="2" marker-end="url(#arr)"/>
+
+  <!-- 3 agent -->
+  <rect x="430" y="256" width="320" height="64" rx="10" fill="#FEE2E2" stroke="#DC2626" stroke-width="1.5"/>
+  <text x="590" y="278" text-anchor="middle" font-size="14" font-weight="700" fill="#991B1B">3 · LangGraph agent — LLM node</text>
+  <text x="590" y="298" text-anchor="middle" font-size="12" fill="#991B1B">sends ONLY new question (checkpointer replays history)</text>
+  <text x="590" y="314" text-anchor="middle" font-size="12" fill="#991B1B">SOUL forces retrieval-first → calls retrieve_context</text>
+  <line x1="590" y1="320" x2="590" y2="344" stroke="#059669" stroke-width="2.4" marker-end="url(#arrG)"/>
+
+  <!-- 4 retrieval big box -->
+  <rect x="150" y="346" width="880" height="246" rx="12" fill="#ECFDF5" stroke="#059669" stroke-width="2"/>
+  <text x="590" y="372" text-anchor="middle" font-size="15" font-weight="700" fill="#065F46">4 · Retrieval (retrieval.py) — for each query in the agentic loop</text>
+
+  <!-- four retrievers -->
+  <g font-size="12.5">
+    <rect x="172" y="386" width="190" height="64" rx="8" fill="#D1FAE5" stroke="#059669"/>
+    <text x="267" y="410" text-anchor="middle" font-weight="700" fill="#065F46">Tree (LLM)</text>
+    <text x="267" y="430" text-anchor="middle" fill="#065F46">reasons over the</text>
+    <text x="267" y="445" text-anchor="middle" fill="#065F46">heading TOC</text>
+
+    <rect x="378" y="386" width="190" height="64" rx="8" fill="#D1FAE5" stroke="#059669"/>
+    <text x="473" y="410" text-anchor="middle" font-weight="700" fill="#065F46">BM25</text>
+    <text x="473" y="430" text-anchor="middle" fill="#065F46">lexical / exact</text>
+    <text x="473" y="445" text-anchor="middle" fill="#065F46">terms, names, codes</text>
+
+    <rect x="584" y="386" width="190" height="64" rx="8" fill="#D1FAE5" stroke="#059669"/>
+    <text x="679" y="410" text-anchor="middle" font-weight="700" fill="#065F46">Dense</text>
+    <text x="679" y="430" text-anchor="middle" fill="#065F46">embedding cosine</text>
+    <text x="679" y="445" text-anchor="middle" fill="#065F46">(cached per unit)</text>
+
+    <rect x="790" y="386" width="218" height="64" rx="8" fill="#CFFAFE" stroke="#0891B2"/>
+    <text x="899" y="410" text-anchor="middle" font-weight="700" fill="#155E75">Graph</text>
+    <text x="899" y="430" text-anchor="middle" fill="#155E75">entity-relation walk</text>
+    <text x="899" y="445" text-anchor="middle" fill="#155E75">(multi-hop)</text>
+  </g>
+
+  <!-- arrows to RRF -->
+  <line x1="267" y1="450" x2="430" y2="480" stroke="#059669" stroke-width="1.8" marker-end="url(#arrG)"/>
+  <line x1="473" y1="450" x2="520" y2="480" stroke="#059669" stroke-width="1.8" marker-end="url(#arrG)"/>
+  <line x1="679" y1="450" x2="630" y2="480" stroke="#059669" stroke-width="1.8" marker-end="url(#arrG)"/>
+  <line x1="899" y1="450" x2="720" y2="480" stroke="#0891B2" stroke-width="1.8" marker-end="url(#arrG)"/>
+
+  <rect x="430" y="482" width="290" height="46" rx="8" fill="#FEF3C7" stroke="#D97706" stroke-width="1.5"/>
+  <text x="575" y="503" text-anchor="middle" font-size="13.5" font-weight="700" fill="#92400E">RRF fusion  score = Σ 1/(60+rank)</text>
+  <text x="575" y="520" text-anchor="middle" font-size="11.5" fill="#92400E">rank-based · no score normalization · no tuned weights</text>
+
+  <line x1="575" y1="528" x2="575" y2="548" stroke="#475569" stroke-width="2" marker-end="url(#arr)"/>
+  <rect x="360" y="550" width="430" height="34" rx="7" fill="#FFEDD5" stroke="#EA580C" stroke-width="1.2"/>
+  <text x="575" y="572" text-anchor="middle" font-size="12.5" fill="#9A3412">(optional) cross-encoder rerank → assemble context ≤ 12 000 chars</text>
+
+  <!-- critique loop arrow on the side -->
+  <path d="M150 469 C 90 469, 90 360, 430 300" fill="none" stroke="#9333EA" stroke-width="2" stroke-dasharray="6 4" marker-end="url(#arr)"/>
+  <rect x="44" y="392" width="104" height="86" rx="8" fill="#F3E8FF" stroke="#9333EA" stroke-width="1.3"/>
+  <text x="96" y="414" text-anchor="middle" font-size="12.5" font-weight="700" fill="#6B21A8">Critic LLM</text>
+  <text x="96" y="433" text-anchor="middle" font-size="11" fill="#6B21A8">"sufficient?"</text>
+  <text x="96" y="449" text-anchor="middle" font-size="11" fill="#6B21A8">if not → emit</text>
+  <text x="96" y="464" text-anchor="middle" font-size="11" fill="#6B21A8">follow-ups</text>
+  <text x="96" y="494" text-anchor="middle" font-size="10.5" fill="#6B21A8">≤ 3 rounds</text>
+
+  <line x1="590" y1="592" x2="590" y2="616" stroke="#059669" stroke-width="2.4" marker-end="url(#arrG)"/>
+
+  <!-- 5 answer -->
+  <rect x="400" y="618" width="380" height="60" rx="10" fill="#FEE2E2" stroke="#DC2626" stroke-width="1.5"/>
+  <text x="590" y="641" text-anchor="middle" font-size="14" font-weight="700" fill="#991B1B">5 · LLM node generates grounded answer</text>
+  <text x="590" y="661" text-anchor="middle" font-size="12" fill="#991B1B">cites [File | Section] · streamed token-by-token over SSE</text>
+  <line x1="590" y1="678" x2="590" y2="702" stroke="#475569" stroke-width="2" marker-end="url(#arr)"/>
+
+  <!-- 6 trailer -->
+  <rect x="330" y="704" width="520" height="78" rx="10" fill="#DBEAFE" stroke="#2563EB" stroke-width="1.5"/>
+  <text x="590" y="726" text-anchor="middle" font-size="14" font-weight="700" fill="#1D4ED8">6 · SSE trailer of sentinels</text>
+  <text x="590" y="747" text-anchor="middle" font-size="12" fill="#1E3A8A">[EVIDENCE] citation chips · [CHAIN] reasoning path</text>
+  <text x="590" y="765" text-anchor="middle" font-size="12" fill="#1E3A8A">then [INTERRUPT] (edit gate)  OR  [EDITED] · then [DONE]</text>
+
+  <line x1="590" y1="782" x2="590" y2="806" stroke="#475569" stroke-width="2" marker-end="url(#arr)"/>
+  <rect x="360" y="808" width="460" height="56" rx="10" fill="#FCE7F3" stroke="#DB2777" stroke-width="1.5"/>
+  <text x="590" y="830" text-anchor="middle" font-size="13.5" font-weight="700" fill="#9D174D">7 · Persist + bound memory (finally block)</text>
+  <text x="590" y="850" text-anchor="middle" font-size="12" fill="#9D174D">save to chat_messages + evidence/chain · compact checkpoint if &gt; 4000 tokens</text>
+</svg>

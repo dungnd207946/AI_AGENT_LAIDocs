@@ -1,0 +1,69 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1140 720" font-family="Segoe UI, -apple-system, Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="arr" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L8,3 L0,6 Z" fill="#475569"/>
+    </marker>
+    <marker id="arrG" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L8,3 L0,6 Z" fill="#16A34A"/>
+    </marker>
+    <marker id="arrR" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L8,3 L0,6 Z" fill="#DC2626"/>
+    </marker>
+  </defs>
+  <rect width="1140" height="720" fill="#F7F8FA"/>
+  <text x="570" y="42" text-anchor="middle" font-size="28" font-weight="700" fill="#0F172A">Document Editing — Human-in-the-Loop via interrupt()</text>
+  <text x="570" y="68" text-anchor="middle" font-size="15" fill="#64748B">the agent can edit your file, but it NEVER writes without explicit approval</text>
+
+  <!-- user asks edit -->
+  <rect x="420" y="92" width="300" height="48" rx="10" fill="#DBEAFE" stroke="#2563EB" stroke-width="1.6"/>
+  <text x="570" y="121" text-anchor="middle" font-size="14" font-weight="700" fill="#1D4ED8">User: "change X to Y in the doc"</text>
+  <line x1="570" y1="140" x2="570" y2="162" stroke="#475569" stroke-width="2" marker-end="url(#arr)"/>
+
+  <!-- apply_edit locates -->
+  <rect x="370" y="164" width="400" height="64" rx="10" fill="#FEE2E2" stroke="#DC2626" stroke-width="1.5"/>
+  <text x="570" y="186" text-anchor="middle" font-size="14" font-weight="700" fill="#991B1B">apply_edit tool runs — read-only phase</text>
+  <text x="570" y="207" text-anchor="middle" font-size="12" fill="#991B1B">locate old_string (exact, then whitespace-normalized);</text>
+  <text x="570" y="222" text-anchor="middle" font-size="12" fill="#991B1B">must be UNIQUE · old_string must come from retrieve_context</text>
+  <line x1="570" y1="228" x2="570" y2="252" stroke="#475569" stroke-width="2" marker-end="url(#arr)"/>
+
+  <!-- interrupt -->
+  <rect x="380" y="254" width="380" height="78" rx="12" fill="#FEF3C7" stroke="#D97706" stroke-width="2.2"/>
+  <text x="570" y="280" text-anchor="middle" font-size="16" font-weight="700" fill="#92400E">⏸  LangGraph interrupt()</text>
+  <text x="570" y="302" text-anchor="middle" font-size="12.5" fill="#92400E">PAUSES the graph · suspended state held in the checkpointer</text>
+  <text x="570" y="320" text-anchor="middle" font-size="12.5" fill="#92400E">file is NOT written · emits SSE [INTERRUPT] {diff}</text>
+
+  <!-- to UI card -->
+  <line x1="570" y1="332" x2="570" y2="356" stroke="#475569" stroke-width="2" marker-end="url(#arr)"/>
+  <rect x="400" y="358" width="340" height="74" rx="10" fill="#EDE9FE" stroke="#7C3AED" stroke-width="1.6"/>
+  <text x="570" y="382" text-anchor="middle" font-size="14" font-weight="700" fill="#5B21B6">UI shows approve / reject card</text>
+  <text x="570" y="403" text-anchor="middle" font-size="12" fill="#5B21B6">red "− removed" / green "+ added" diff</text>
+  <text x="570" y="421" text-anchor="middle" font-size="12" fill="#5B21B6">user decides</text>
+
+  <!-- branch -->
+  <line x1="470" y1="432" x2="300" y2="476" stroke="#16A34A" stroke-width="2.2" marker-end="url(#arrG)"/>
+  <line x1="670" y1="432" x2="840" y2="476" stroke="#DC2626" stroke-width="2.2" marker-end="url(#arrR)"/>
+  <text x="350" y="462" text-anchor="middle" font-size="13" font-weight="700" fill="#16A34A">approve</text>
+  <text x="800" y="462" text-anchor="middle" font-size="13" font-weight="700" fill="#DC2626">reject</text>
+
+  <!-- approve -->
+  <rect x="100" y="478" width="400" height="120" rx="12" fill="#DCFCE7" stroke="#16A34A" stroke-width="1.8"/>
+  <text x="300" y="502" text-anchor="middle" font-size="14" font-weight="700" fill="#166534">POST /api/chat/resume  Command(resume="approve")</text>
+  <text x="118" y="526" font-size="12.5" fill="#166534">apply_edit RE-RUNS on the same thread_id:</text>
+  <text x="118" y="546" font-size="12.5" fill="#166534">· locate logic re-runs idempotently (harmless)</text>
+  <text x="118" y="566" font-size="12.5" fill="#166534">· post-interrupt WRITE runs exactly ONCE</text>
+  <text x="118" y="586" font-size="12.5" fill="#166534">· persist_document_content → .md + SQLite + tree → [EDITED]</text>
+
+  <!-- reject -->
+  <rect x="640" y="478" width="400" height="120" rx="12" fill="#FEE2E2" stroke="#DC2626" stroke-width="1.8"/>
+  <text x="840" y="502" text-anchor="middle" font-size="14" font-weight="700" fill="#991B1B">Command(resume="reject")</text>
+  <text x="658" y="526" font-size="12.5" fill="#7F1D1D">· file left completely untouched</text>
+  <text x="658" y="546" font-size="12.5" fill="#7F1D1D">· tool returns "edit rejected by the user"</text>
+  <text x="658" y="566" font-size="12.5" fill="#7F1D1D">· agent acknowledges, doesn't retry</text>
+  <text x="658" y="586" font-size="12.5" fill="#7F1D1D">· anything ≠ "approve" cancels the edit</text>
+
+  <!-- stale gate guards -->
+  <rect x="100" y="616" width="940" height="86" rx="12" fill="#F1F5F9" stroke="#64748B" stroke-width="1.4"/>
+  <text x="124" y="640" font-size="14" font-weight="700" fill="#334155">Stale-gate guards (a pending interrupt would otherwise wedge the thread)</text>
+  <text x="124" y="664" font-size="12.5" fill="#475569">· /stream drains a silent "reject" before any NEW question → abandoned edit safely discarded, even across an app restart</text>
+  <text x="124" y="685" font-size="12.5" fill="#475569">· /resume no-ops if nothing is suspended (guards double-clicks)  ·  compaction is SKIPPED while a turn is interrupted</text>
+</svg>
