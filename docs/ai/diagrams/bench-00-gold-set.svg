@@ -1,0 +1,82 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 640" font-family="Segoe UI, -apple-system, Helvetica, Arial, sans-serif">
+  <rect width="1120" height="640" fill="#F7F8FA"/>
+  <text x="560" y="46" text-anchor="middle" font-size="28" font-weight="700" fill="#0F172A">Gold Evaluation Set — 30 Questions</text>
+  <text x="560" y="72" text-anchor="middle" font-size="15" fill="#64748B">one structured document type · numbers in the benchmark tables are meaningless without this composition</text>
+
+  <!-- caveat pill -->
+  <rect x="300" y="88" width="520" height="30" rx="15" fill="#FEF3C7" stroke="#D97706" stroke-width="1.2"/>
+  <text x="560" y="108" text-anchor="middle" font-size="12" fill="#92400E">Illustrative composition — define your own gold set with scripts/ai_eval/</text>
+
+  <!-- stacked bar -->
+  <text x="60" y="150" font-size="14" font-weight="700" fill="#334155">Question mix (proportional)</text>
+  <g>
+    <rect x="60" y="162" width="400" height="62" fill="#DBEAFE" stroke="#2563EB" stroke-width="1.6"/>
+    <text x="260" y="190" text-anchor="middle" font-size="14" font-weight="700" fill="#1D4ED8">Single-hop</text>
+    <text x="260" y="210" text-anchor="middle" font-size="13" fill="#1E3A8A">12</text>
+
+    <rect x="460" y="162" width="267" height="62" fill="#EDE9FE" stroke="#7C3AED" stroke-width="1.6"/>
+    <text x="593" y="190" text-anchor="middle" font-size="14" font-weight="700" fill="#5B21B6">Multi-hop</text>
+    <text x="593" y="210" text-anchor="middle" font-size="13" fill="#5B21B6">8</text>
+
+    <rect x="727" y="162" width="200" height="62" fill="#CFFAFE" stroke="#0891B2" stroke-width="1.6"/>
+    <text x="827" y="190" text-anchor="middle" font-size="14" font-weight="700" fill="#155E75">Table/Figure</text>
+    <text x="827" y="210" text-anchor="middle" font-size="13" fill="#155E75">6</text>
+
+    <rect x="927" y="162" width="133" height="62" fill="#FEE2E2" stroke="#DC2626" stroke-width="1.6"/>
+    <text x="993" y="188" text-anchor="middle" font-size="13" font-weight="700" fill="#991B1B">Out-of</text>
+    <text x="993" y="204" text-anchor="middle" font-size="13" font-weight="700" fill="#991B1B">-scope</text>
+    <text x="993" y="220" text-anchor="middle" font-size="12" fill="#991B1B">4</text>
+  </g>
+
+  <!-- table -->
+  <g font-size="13.5">
+    <!-- header -->
+    <rect x="60" y="262" width="1000" height="44" fill="#334155"/>
+    <text x="80" y="290" font-size="13.5" font-weight="700" fill="#FFFFFF">Category</text>
+    <text x="470" y="290" text-anchor="middle" font-size="13.5" font-weight="700" fill="#FFFFFF">n</text>
+    <text x="640" y="290" text-anchor="middle" font-size="13.5" font-weight="700" fill="#FFFFFF">Gold units / Q</text>
+    <text x="850" y="290" text-anchor="middle" font-size="13.5" font-weight="700" fill="#FFFFFF">What it stresses</text>
+
+    <!-- rows -->
+    <rect x="60" y="306" width="1000" height="40" fill="#FFFFFF"/>
+    <text x="80" y="331" fill="#1E3A8A" font-weight="600">Single-hop factual</text>
+    <text x="470" y="331" text-anchor="middle" fill="#334155">12</text>
+    <text x="640" y="331" text-anchor="middle" fill="#334155">1</text>
+    <text x="850" y="331" text-anchor="middle" fill="#475569">basic retrieval precision</text>
+
+    <rect x="60" y="346" width="1000" height="40" fill="#F1F5F9"/>
+    <text x="80" y="371" fill="#5B21B6" font-weight="600">Multi-hop (split evidence)</text>
+    <text x="470" y="371" text-anchor="middle" fill="#334155">8</text>
+    <text x="640" y="371" text-anchor="middle" fill="#334155">2–3</text>
+    <text x="850" y="371" text-anchor="middle" fill="#475569">agentic loop + GraphRAG</text>
+
+    <rect x="60" y="386" width="1000" height="40" fill="#FFFFFF"/>
+    <text x="80" y="411" fill="#155E75" font-weight="600">Table / figure</text>
+    <text x="470" y="411" text-anchor="middle" fill="#334155">6</text>
+    <text x="640" y="411" text-anchor="middle" fill="#334155">1–2</text>
+    <text x="850" y="411" text-anchor="middle" fill="#475569">multimodal units (tbl* / img*)</text>
+
+    <rect x="60" y="426" width="1000" height="40" fill="#F1F5F9"/>
+    <text x="80" y="451" fill="#991B1B" font-weight="600">Out-of-scope</text>
+    <text x="470" y="451" text-anchor="middle" fill="#334155">4</text>
+    <text x="640" y="451" text-anchor="middle" fill="#334155">0</text>
+    <text x="850" y="451" text-anchor="middle" fill="#475569">refusal / anti-hallucination</text>
+
+    <!-- total -->
+    <rect x="60" y="466" width="1000" height="42" fill="#E2E8F0"/>
+    <text x="80" y="492" font-weight="700" fill="#0F172A">Total</text>
+    <text x="470" y="492" text-anchor="middle" font-weight="700" fill="#0F172A">30</text>
+    <text x="640" y="492" text-anchor="middle" font-weight="700" fill="#0F172A">~1.6 avg</text>
+    <text x="850" y="492" text-anchor="middle" font-weight="700" fill="#334155">26 answerable + 4 refusals</text>
+
+    <!-- borders -->
+    <rect x="60" y="262" width="1000" height="246" fill="none" stroke="#94A3B8" stroke-width="1.4"/>
+    <line x1="455" y1="262" x2="455" y2="508" stroke="#CBD5E1"/>
+    <line x1="555" y1="262" x2="555" y2="508" stroke="#CBD5E1"/>
+    <line x1="725" y1="262" x2="725" y2="508" stroke="#CBD5E1"/>
+  </g>
+
+  <text x="60" y="540" font-size="13" fill="#64748B">Key consequence: with ~1.6 gold units/question, precision@5 is capped near 0.32 by construction — that is why P@5 looks low, not a defect.</text>
+  <text x="60" y="562" font-size="13" fill="#64748B">Recall@k is the headline metric for a grounded assistant: if the evidence is not retrieved, no model can answer correctly.</text>
+  <text x="60" y="584" font-size="13" fill="#64748B">Deterministic metrics are stable at n=30; LLM-judged metrics are noisier — average ≥3 runs (EVALUATION.md §10).</text>
+</svg>

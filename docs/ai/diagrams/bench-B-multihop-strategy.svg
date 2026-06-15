@@ -1,0 +1,59 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 500" font-family="Segoe UI, -apple-system, Helvetica, Arial, sans-serif">
+  <rect width="1000" height="500" fill="#F7F8FA"/>
+  <text x="500" y="44" text-anchor="middle" font-size="26" font-weight="700" fill="#0F172A">Table B · Retrieval Strategy on the Multi-Hop Subset</text>
+  <text x="500" y="70" text-anchor="middle" font-size="14" fill="#64748B">R@8 · n = 8 split-evidence questions · this is where agentic + graph earn their cost</text>
+  <rect x="270" y="86" width="460" height="28" rx="14" fill="#FEF3C7" stroke="#D97706" stroke-width="1.1"/>
+  <text x="500" y="105" text-anchor="middle" font-size="11.5" fill="#92400E">Illustrative — measure on YOUR multi-hop subset (gold units in ≥2 sections)</text>
+
+  <g font-size="14.5" text-anchor="middle">
+    <!-- header -->
+    <rect x="50" y="132" width="890" height="46" fill="#334155"/>
+    <text x="70" y="161" text-anchor="start" font-size="14" font-weight="700" fill="#FFFFFF">Strategy</text>
+    <text x="510" y="161" font-size="14" font-weight="700" fill="#FFFFFF">R@8 (multi-hop)</text>
+    <text x="700" y="161" font-size="14" font-weight="700" fill="#FFFFFF">Faithfulness</text>
+    <text x="865" y="161" font-size="14" font-weight="700" fill="#FFFFFF">Avg LLM calls</text>
+
+    <!-- row1 -->
+    <rect x="50" y="178" width="890" height="48" fill="#FFFFFF"/>
+    <text x="70" y="208" text-anchor="start" fill="#1E293B">Single-shot hybrid</text>
+    <text x="510" y="208" fill="#334155">0.60</text>
+    <text x="700" y="208" fill="#334155">0.73</text>
+    <text x="865" y="208" fill="#334155">1</text>
+
+    <!-- row2 -->
+    <rect x="50" y="226" width="890" height="48" fill="#F1F5F9"/>
+    <text x="70" y="256" text-anchor="start" fill="#1E293B">+ Agentic self-critique</text>
+    <text x="510" y="256" fill="#16A34A" font-weight="700">0.78</text>
+    <text x="700" y="256" fill="#16A34A" font-weight="700">0.84</text>
+    <text x="865" y="256" fill="#334155">2.4</text>
+
+    <!-- row3 highlight -->
+    <rect x="50" y="274" width="890" height="48" fill="#D1FAE5"/>
+    <rect x="50" y="274" width="6" height="48" fill="#059669"/>
+    <text x="70" y="304" text-anchor="start" font-weight="700" fill="#065F46">+ Agentic + Graph</text>
+    <text x="510" y="304" font-weight="700" fill="#065F46">0.82</text>
+    <text x="700" y="304" font-weight="700" fill="#065F46">0.87</text>
+    <text x="865" y="304" font-weight="700" fill="#065F46">3.1</text>
+
+    <!-- borders -->
+    <rect x="50" y="132" width="890" height="190" fill="none" stroke="#94A3B8" stroke-width="1.4"/>
+    <line x1="410" y1="132" x2="410" y2="322" stroke="#CBD5E1"/>
+    <line x1="610" y1="132" x2="610" y2="322" stroke="#CBD5E1"/>
+    <line x1="790" y1="132" x2="790" y2="322" stroke="#CBD5E1"/>
+  </g>
+
+  <!-- delta callout -->
+  <rect x="50" y="346" width="430" height="120" rx="10" fill="#ECFDF5" stroke="#059669" stroke-width="1.3"/>
+  <text x="265" y="370" text-anchor="middle" font-size="13.5" font-weight="700" fill="#065F46">The lift is real but targeted</text>
+  <text x="68" y="394" font-size="12.5" fill="#065F46">· +18 pts recall: follow-up sub-queries fetch the</text>
+  <text x="68" y="412" font-size="12.5" fill="#065F46">  second-hop passage single-shot misses</text>
+  <text x="68" y="432" font-size="12.5" fill="#065F46">· more complete evidence → fewer unsupported</text>
+  <text x="68" y="450" font-size="12.5" fill="#065F46">  claims → higher faithfulness</text>
+
+  <rect x="510" y="346" width="430" height="120" rx="10" fill="#FFF7ED" stroke="#EA580C" stroke-width="1.3"/>
+  <text x="725" y="370" text-anchor="middle" font-size="13.5" font-weight="700" fill="#9A3412">The cost (be honest)</text>
+  <text x="528" y="394" font-size="12.5" fill="#9A3412">· ~2–3× the LLM calls of single-shot</text>
+  <text x="528" y="412" font-size="12.5" fill="#9A3412">· on single-hop lookups the three rows are</text>
+  <text x="528" y="430" font-size="12.5" fill="#9A3412">  nearly identical — it is a targeted spend</text>
+  <text x="528" y="450" font-size="12.5" fill="#9A3412">· bounded: ≤3 rounds, ≤2 follow-ups/round</text>
+</svg>

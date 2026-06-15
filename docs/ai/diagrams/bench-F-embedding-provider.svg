@@ -1,0 +1,46 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 440" font-family="Segoe UI, -apple-system, Helvetica, Arial, sans-serif">
+  <rect width="1000" height="440" fill="#F7F8FA"/>
+  <text x="500" y="44" text-anchor="middle" font-size="26" font-weight="700" fill="#0F172A">Table F · Embedding Provider Comparison</text>
+  <text x="500" y="70" text-anchor="middle" font-size="14" fill="#64748B">answers "why Gemini embeddings?" · hosted is a few points better; local keeps the pipeline offline</text>
+  <rect x="270" y="86" width="460" height="28" rx="14" fill="#FEF3C7" stroke="#D97706" stroke-width="1.1"/>
+  <text x="500" y="105" text-anchor="middle" font-size="11.5" fill="#92400E">Illustrative — swap embed_model in Settings and re-run the dense variant to verify</text>
+
+  <g font-size="15" text-anchor="middle">
+    <!-- header -->
+    <rect x="50" y="134" width="890" height="46" fill="#334155"/>
+    <text x="70" y="163" text-anchor="start" font-size="14" font-weight="700" fill="#FFFFFF">Embedding model</text>
+    <text x="555" y="163" font-size="14" font-weight="700" fill="#FFFFFF">R@5</text>
+    <text x="725" y="163" font-size="14" font-weight="700" fill="#FFFFFF">nDCG@5</text>
+    <text x="875" y="163" font-size="14" font-weight="700" fill="#FFFFFF">Local?</text>
+
+    <!-- row1 highlight (default) -->
+    <rect x="50" y="180" width="890" height="46" fill="#D1FAE5"/>
+    <rect x="50" y="180" width="6" height="46" fill="#059669"/>
+    <text x="70" y="209" text-anchor="start" font-weight="700" fill="#065F46">Gemini  gemini-embedding-001  (default)</text>
+    <text x="555" y="209" font-weight="700" fill="#065F46">0.78</text>
+    <text x="725" y="209" font-weight="700" fill="#065F46">0.72</text>
+    <text x="875" y="209" font-weight="700" fill="#DC2626">✗</text>
+
+    <rect x="50" y="226" width="890" height="46" fill="#FFFFFF"/>
+    <text x="70" y="255" text-anchor="start" fill="#1E293B">OpenAI  text-embedding-3-small</text>
+    <text x="555" y="255" fill="#334155">0.77</text>
+    <text x="725" y="255" fill="#334155">0.71</text>
+    <text x="875" y="255" fill="#DC2626">✗</text>
+
+    <rect x="50" y="272" width="890" height="46" fill="#F1F5F9"/>
+    <text x="70" y="301" text-anchor="start" fill="#1E293B">Local  bge-small  (via Ollama)</text>
+    <text x="555" y="301" fill="#334155">0.71</text>
+    <text x="725" y="301" fill="#334155">0.65</text>
+    <text x="875" y="301" fill="#16A34A" font-weight="700">✓</text>
+
+    <rect x="50" y="134" width="890" height="184" fill="none" stroke="#94A3B8" stroke-width="1.4"/>
+    <line x1="470" y1="134" x2="470" y2="318" stroke="#CBD5E1"/>
+    <line x1="640" y1="134" x2="640" y2="318" stroke="#CBD5E1"/>
+    <line x1="810" y1="134" x2="810" y2="318" stroke="#CBD5E1"/>
+  </g>
+
+  <rect x="50" y="344" width="890" height="74" rx="10" fill="#EFF6FF" stroke="#2563EB" stroke-width="1.3"/>
+  <text x="70" y="369" font-size="14" font-weight="700" fill="#1D4ED8">Talk track</text>
+  <text x="70" y="393" font-size="13" fill="#1E3A8A">Hosted embeddings are a few points better, but the local option keeps the WHOLE pipeline offline — it's a</text>
+  <text x="70" y="411" font-size="13" fill="#1E3A8A">privacy/quality knob, not a fixed choice. The provider-agnostic factory makes it a one-line settings change.</text>
+</svg>

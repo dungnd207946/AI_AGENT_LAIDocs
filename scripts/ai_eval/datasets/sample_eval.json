@@ -38,5 +38,204 @@
     },
     "context": "[Table: Financial summary (tbl0002)]\n| Year | Revenue |\n| --- | --- |\n| 2024 | $4.2M |\n| 2025 | $5.8M |",
     "answer": "Total revenue in the most recent fiscal year (2025) was $5.8M."
+  },
+  {
+    "question": "What is the refund window for purchases?",
+    "gold_units": ["0007"],
+    "doc_id": "REPLACE_WITH_REAL_DOC_ID",
+    "ranked_units": {
+      "bm25":   ["0007", "0003", "0011", "0002", "0009"],
+      "dense":  ["0007", "0011", "0003", "0005", "0002"],
+      "tree":   ["0007", "0008"],
+      "hybrid": ["0007", "0003", "0011", "0008", "0005"]
+    },
+    "context": "[Section: Refunds (node 0007)] Refunds are available within 30 days of the original purchase date. After 30 days no refund is issued.",
+    "answer": "You can request a refund within 30 days of the purchase date."
+  },
+  {
+    "question": "Which city is the company headquartered in, and who founded it?",
+    "gold_units": ["0002", "0004"],
+    "doc_id": "REPLACE_WITH_REAL_DOC_ID",
+    "ranked_units": {
+      "bm25":   ["0002", "0009", "0004", "0001", "0007"],
+      "dense":  ["0004", "0002", "0001", "0009", "0011"],
+      "tree":   ["0002"],
+      "hybrid": ["0002", "0004", "0001", "0009", "0007"],
+      "graph":  ["0002", "0004", "0001"]
+    },
+    "context": "[Section: About (node 0002)] Acme Corp is headquartered in Berlin. [Section: History (node 0004)] Acme Corp was founded by Jane Doe in 2011.",
+    "answer": "Acme Corp is headquartered in Berlin and was founded by Jane Doe."
+  },
+  {
+    "question": "What were total revenues in the most recent fiscal year?",
+    "gold_units": ["tbl0002"],
+    "doc_id": "REPLACE_WITH_REAL_DOC_ID",
+    "ranked_units": {
+      "bm25":   ["0010", "tbl0002", "0011", "0003", "0007"],
+      "dense":  ["tbl0002", "0010", "0011", "0005", "0003"],
+      "tree":   ["0010"],
+      "hybrid": ["tbl0002", "0010", "0011", "0003", "0005"]
+    },
+    "context": "[Table: Financial summary (tbl0002)]\n| Year | Revenue |\n| --- | --- |\n| 2024 | $4.2M |\n| 2025 | $5.8M |",
+    "answer": "Total revenue in the most recent fiscal year (2025) was $5.8M."
+  },{
+    "question": "What is the refund window for purchases?",
+    "gold_units": ["0007"],
+    "doc_id": "REPLACE_WITH_REAL_DOC_ID",
+    "ranked_units": {
+      "bm25":   ["0007", "0003", "0011", "0002", "0009"],
+      "dense":  ["0007", "0011", "0003", "0005", "0002"],
+      "tree":   ["0007", "0008"],
+      "hybrid": ["0007", "0003", "0011", "0008", "0005"]
+    },
+    "context": "[Section: Refunds (node 0007)] Refunds are available within 30 days of the original purchase date. After 30 days no refund is issued.",
+    "answer": "You can request a refund within 30 days of the purchase date."
+  },
+  {
+    "question": "Which city is the company headquartered in, and who founded it?",
+    "gold_units": ["0002", "0004"],
+    "doc_id": "REPLACE_WITH_REAL_DOC_ID",
+    "ranked_units": {
+      "bm25":   ["0002", "0009", "0004", "0001", "0007"],
+      "dense":  ["0004", "0002", "0001", "0009", "0011"],
+      "tree":   ["0002"],
+      "hybrid": ["0002", "0004", "0001", "0009", "0007"],
+      "graph":  ["0002", "0004", "0001"]
+    },
+    "context": "[Section: About (node 0002)] Acme Corp is headquartered in Berlin. [Section: History (node 0004)] Acme Corp was founded by Jane Doe in 2011.",
+    "answer": "Acme Corp is headquartered in Berlin and was founded by Jane Doe."
+  },
+  {
+    "question": "What were total revenues in the most recent fiscal year?",
+    "gold_units": ["tbl0002"],
+    "doc_id": "REPLACE_WITH_REAL_DOC_ID",
+    "ranked_units": {
+      "bm25":   ["0010", "tbl0002", "0011", "0003", "0007"],
+      "dense":  ["tbl0002", "0010", "0011", "0005", "0003"],
+      "tree":   ["0010"],
+      "hybrid": ["tbl0002", "0010", "0011", "0003", "0005"]
+    },
+    "context": "[Table: Financial summary (tbl0002)]\n| Year | Revenue |\n| --- | --- |\n| 2024 | $4.2M |\n| 2025 | $5.8M |",
+    "answer": "Total revenue in the most recent fiscal year (2025) was $5.8M."
+  },
+  {
+    "question": "What is the refund window for purchases?",
+    "gold_units": ["0007"],
+    "doc_id": "REPLACE_WITH_REAL_DOC_ID",
+    "ranked_units": {
+      "bm25":   ["0007", "0003", "0011", "0002", "0009"],
+      "dense":  ["0007", "0011", "0003", "0005", "0002"],
+      "tree":   ["0007", "0008"],
+      "hybrid": ["0007", "0003", "0011", "0008", "0005"]
+    },
+    "context": "[Section: Refunds (node 0007)] Refunds are available within 30 days of the original purchase date. After 30 days no refund is issued.",
+    "answer": "You can request a refund within 30 days of the purchase date."
+  },
+  {
+    "question": "Which city is the company headquartered in, and who founded it?",
+    "gold_units": ["0002", "0004"],
+    "doc_id": "REPLACE_WITH_REAL_DOC_ID",
+    "ranked_units": {
+      "bm25":   ["0002", "0009", "0004", "0001", "0007"],
+      "dense":  ["0004", "0002", "0001", "0009", "0011"],
+      "tree":   ["0002"],
+      "hybrid": ["0002", "0004", "0001", "0009", "0007"],
+      "graph":  ["0002", "0004", "0001"]
+    },
+    "context": "[Section: About (node 0002)] Acme Corp is headquartered in Berlin. [Section: History (node 0004)] Acme Corp was founded by Jane Doe in 2011.",
+    "answer": "Acme Corp is headquartered in Berlin and was founded by Jane Doe."
+  },
+  {
+    "question": "What were total revenues in the most recent fiscal year?",
+    "gold_units": ["tbl0002"],
+    "doc_id": "REPLACE_WITH_REAL_DOC_ID",
+    "ranked_units": {
+      "bm25":   ["0010", "tbl0002", "0011", "0003", "0007"],
+      "dense":  ["tbl0002", "0010", "0011", "0005", "0003"],
+      "tree":   ["0010"],
+      "hybrid": ["tbl0002", "0010", "0011", "0003", "0005"]
+    },
+    "context": "[Table: Financial summary (tbl0002)]\n| Year | Revenue |\n| --- | --- |\n| 2024 | $4.2M |\n| 2025 | $5.8M |",
+    "answer": "Total revenue in the most recent fiscal year (2025) was $5.8M."
+  },
+  {
+    "question": "What is the refund window for purchases?",
+    "gold_units": ["0007"],
+    "doc_id": "REPLACE_WITH_REAL_DOC_ID",
+    "ranked_units": {
+      "bm25":   ["0007", "0003", "0011", "0002", "0009"],
+      "dense":  ["0007", "0011", "0003", "0005", "0002"],
+      "tree":   ["0007", "0008"],
+      "hybrid": ["0007", "0003", "0011", "0008", "0005"]
+    },
+    "context": "[Section: Refunds (node 0007)] Refunds are available within 30 days of the original purchase date. After 30 days no refund is issued.",
+    "answer": "You can request a refund within 30 days of the purchase date."
+  },
+  {
+    "question": "Which city is the company headquartered in, and who founded it?",
+    "gold_units": ["0002", "0004"],
+    "doc_id": "REPLACE_WITH_REAL_DOC_ID",
+    "ranked_units": {
+      "bm25":   ["0002", "0009", "0004", "0001", "0007"],
+      "dense":  ["0004", "0002", "0001", "0009", "0011"],
+      "tree":   ["0002"],
+      "hybrid": ["0002", "0004", "0001", "0009", "0007"],
+      "graph":  ["0002", "0004", "0001"]
+    },
+    "context": "[Section: About (node 0002)] Acme Corp is headquartered in Berlin. [Section: History (node 0004)] Acme Corp was founded by Jane Doe in 2011.",
+    "answer": "Acme Corp is headquartered in Berlin and was founded by Jane Doe."
+  },
+  {
+    "question": "What were total revenues in the most recent fiscal year?",
+    "gold_units": ["tbl0002"],
+    "doc_id": "REPLACE_WITH_REAL_DOC_ID",
+    "ranked_units": {
+      "bm25":   ["0010", "tbl0002", "0011", "0003", "0007"],
+      "dense":  ["tbl0002", "0010", "0011", "0005", "0003"],
+      "tree":   ["0010"],
+      "hybrid": ["tbl0002", "0010", "0011", "0003", "0005"]
+    },
+    "context": "[Table: Financial summary (tbl0002)]\n| Year | Revenue |\n| --- | --- |\n| 2024 | $4.2M |\n| 2025 | $5.8M |",
+    "answer": "Total revenue in the most recent fiscal year (2025) was $5.8M."
+  },
+  {
+    "question": "What is the refund window for purchases?",
+    "gold_units": ["0007"],
+    "doc_id": "REPLACE_WITH_REAL_DOC_ID",
+    "ranked_units": {
+      "bm25":   ["0007", "0003", "0011", "0002", "0009"],
+      "dense":  ["0007", "0011", "0003", "0005", "0002"],
+      "tree":   ["0007", "0008"],
+      "hybrid": ["0007", "0003", "0011", "0008", "0005"]
+    },
+    "context": "[Section: Refunds (node 0007)] Refunds are available within 30 days of the original purchase date. After 30 days no refund is issued.",
+    "answer": "You can request a refund within 30 days of the purchase date."
+  },
+  {
+    "question": "Which city is the company headquartered in, and who founded it?",
+    "gold_units": ["0002", "0004"],
+    "doc_id": "REPLACE_WITH_REAL_DOC_ID",
+    "ranked_units": {
+      "bm25":   ["0002", "0009", "0004", "0001", "0007"],
+      "dense":  ["0004", "0002", "0001", "0009", "0011"],
+      "tree":   ["0002"],
+      "hybrid": ["0002", "0004", "0001", "0009", "0007"],
+      "graph":  ["0002", "0004", "0001"]
+    },
+    "context": "[Section: About (node 0002)] Acme Corp is headquartered in Berlin. [Section: History (node 0004)] Acme Corp was founded by Jane Doe in 2011.",
+    "answer": "Acme Corp is headquartered in Berlin and was founded by Jane Doe."
+  },
+  {
+    "question": "What were total revenues in the most recent fiscal year?",
+    "gold_units": ["tbl0002"],
+    "doc_id": "REPLACE_WITH_REAL_DOC_ID",
+    "ranked_units": {
+      "bm25":   ["0010", "tbl0002", "0011", "0003", "0007"],
+      "dense":  ["tbl0002", "0010", "0011", "0005", "0003"],
+      "tree":   ["0010"],
+      "hybrid": ["tbl0002", "0010", "0011", "0003", "0005"]
+    },
+    "context": "[Table: Financial summary (tbl0002)]\n| Year | Revenue |\n| --- | --- |\n| 2024 | $4.2M |\n| 2025 | $5.8M |",
+    "answer": "Total revenue in the most recent fiscal year (2025) was $5.8M."
   }
 ]
